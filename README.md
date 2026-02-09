@@ -61,7 +61,6 @@ The data JSON files live in `/server/data` and can be backed up or migrated to a
 - Use the repo root as the service root so the `postinstall` script can install client/server dependencies.
 - Build command: `npm run build`
 - Start command: `npm run start`
-- If you still see a blank page, confirm `client/dist/index.html` exists on the server (the `prestart` script will build it if missing).
 
 ## API Endpoints
 ```
