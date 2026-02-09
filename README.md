@@ -57,6 +57,11 @@ All data is stored as JSON in:
 
 The data JSON files live in `/server/data` and can be backed up or migrated to another machine.
 
+### Render deployment tip
+- Use the repo root as the service root so the `postinstall` script can install client/server dependencies.
+- Build command: `npm run build`
+- Start command: `npm run start`
+
 ## API Endpoints
 ```
 GET  /api/settings
