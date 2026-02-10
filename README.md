@@ -58,10 +58,10 @@ All data is stored as JSON in:
 The data JSON files live in `/server/data` and can be backed up or migrated to another machine.
 
 
-### Netlify (client-only, no server files needed)
-- This repo includes `netlify.toml` configured for a **static client-only deploy**.
-- Netlify will build from `client/` and publish `client/dist`.
-- `VITE_FORCE_LOCAL_STORAGE=true` is set so the app uses browser localStorage only (no `/api` server dependency).
+### Netlify (Next.js client-only, no server files needed)
+- This repo includes a dedicated Next.js frontend under `next-client/` for static Netlify deploys.
+- `netlify.toml` is configured to build from `next-client/` and publish `next-client/out`.
+- `NEXT_PUBLIC_FORCE_LOCAL_STORAGE=true` is set so the app runs in browser localStorage mode only (no `/api` server dependency).
 - This means no `server/data` files are required on Netlify.
 
 ### Render deployment tip
