@@ -212,6 +212,78 @@ export default function App() {
     [syncTimerState]
   );
 
+  const handlePhaseCompletion = useCallback(
+    (recordSessions = true, stateOverride?: TimerState) => {
+      const activeState = stateOverride ?? timerState;
+      const now = new Date();
+      const phaseStart =
+        activeState.phaseStartedAt ?? new Date(now.getTime() - activeState.remainingSeconds * 1000).toISOString();
+      const durationSeconds = getPhaseDuration(settings, activeState.phase);
+
+      if (client && recordSessions) {
+        if (activeState.phase === "focus") {
+          client
+            .createSession({
+              type: "focus",
+              topicId: activeState.currentTopicId,
+              topicName: currentTopic?.name ?? null,
+              note: null,
+              startTime: phaseStart,
+              endTime: now.toISOString(),
+              durationSeconds
+            })
+            .then((newSession) => setSessions((prev) => [...prev, newSession]));
+        }
+
+        if (activeState.phase !== "focus" && settings.trackBreaks) {
+          client
+            .createSession({
+              type: "break",
+              topicId: activeState.currentTopicId,
+              topicName: currentTopic?.name ?? null,
+              note: null,
+              startTime: phaseStart,
+              endTime: now.toISOString(),
+              durationSeconds
+            })
+            .then((newSession) => setSessions((prev) => [...prev, newSession]));
+        }
+      }
+
+      const nextFocusCount =
+        activeState.phase === "focus" ? activeState.completedFocusSessions + 1 : activeState.completedFocusSessions;
+      const nextPhase: TimerPhase =
+        activeState.phase === "focus"
+          ? nextFocusCount % settings.longBreakInterval === 0
+            ? "longBreak"
+            : "shortBreak"
+          : "focus";
+
+      const shouldAutoStart =
+        nextPhase === "focus" ? settings.autoStartFocus : settings.autoStartBreaks;
+
+      if (recordSessions) {
+        notify(
+          nextPhase === "focus" ? "Break complete" : "Focus complete",
+          nextPhase === "focus" ? "Time to focus again." : "Take a short break."
+        );
+      }
+
+      const updated: TimerState = {
+        phase: nextPhase,
+        remainingSeconds: getPhaseDuration(settings, nextPhase),
+        isRunning: shouldAutoStart,
+        startedAt: shouldAutoStart ? new Date().toISOString() : null,
+        phaseStartedAt: shouldAutoStart ? new Date().toISOString() : null,
+        currentTopicId: activeState.currentTopicId,
+        completedFocusSessions: nextFocusCount
+      };
+
+      syncTimerState(updated);
+    },
+    [client, currentTopic?.name, settings, syncTimerState, timerState]
+  );
+
   useEffect(() => {
     createDataClient(false).then((selectedClient) => {
       setClient(selectedClient);
@@ -282,78 +354,6 @@ export default function App() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   });
-
-  const handlePhaseCompletion = useCallback(
-    (recordSessions = true, stateOverride?: TimerState) => {
-      const activeState = stateOverride ?? timerState;
-      const now = new Date();
-      const phaseStart =
-        activeState.phaseStartedAt ?? new Date(now.getTime() - activeState.remainingSeconds * 1000).toISOString();
-      const durationSeconds = getPhaseDuration(settings, activeState.phase);
-
-      if (client && recordSessions) {
-        if (activeState.phase === "focus") {
-          client
-            .createSession({
-              type: "focus",
-              topicId: activeState.currentTopicId,
-              topicName: currentTopic?.name ?? null,
-              note: null,
-              startTime: phaseStart,
-              endTime: now.toISOString(),
-              durationSeconds
-            })
-            .then((newSession) => setSessions((prev) => [...prev, newSession]));
-        }
-
-        if (activeState.phase !== "focus" && settings.trackBreaks) {
-          client
-            .createSession({
-              type: "break",
-              topicId: activeState.currentTopicId,
-              topicName: currentTopic?.name ?? null,
-              note: null,
-              startTime: phaseStart,
-              endTime: now.toISOString(),
-              durationSeconds
-            })
-            .then((newSession) => setSessions((prev) => [...prev, newSession]));
-        }
-      }
-
-      const nextFocusCount =
-        activeState.phase === "focus" ? activeState.completedFocusSessions + 1 : activeState.completedFocusSessions;
-      const nextPhase: TimerPhase =
-        activeState.phase === "focus"
-          ? nextFocusCount % settings.longBreakInterval === 0
-            ? "longBreak"
-            : "shortBreak"
-          : "focus";
-
-    const shouldAutoStart =
-      nextPhase === "focus" ? settings.autoStartFocus : settings.autoStartBreaks;
-
-    if (recordSessions) {
-      notify(
-        nextPhase === "focus" ? "Break complete" : "Focus complete",
-        nextPhase === "focus" ? "Time to focus again." : "Take a short break."
-      );
-    }
-
-      const updated: TimerState = {
-        phase: nextPhase,
-        remainingSeconds: getPhaseDuration(settings, nextPhase),
-        isRunning: shouldAutoStart,
-        startedAt: shouldAutoStart ? new Date().toISOString() : null,
-        phaseStartedAt: shouldAutoStart ? new Date().toISOString() : null,
-        currentTopicId: activeState.currentTopicId,
-        completedFocusSessions: nextFocusCount
-      };
-
-      syncTimerState(updated);
-    },
-    [client, currentTopic?.name, settings, syncTimerState, timerState]
-  );
 
   const handleStartPause = useCallback(() => {
     syncTimerState({
