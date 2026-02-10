@@ -17,6 +17,8 @@ const defaultSettings: Settings = {
   useLocalStorageFallback: false
 };
 
+const forceLocalStorageMode = import.meta.env.VITE_FORCE_LOCAL_STORAGE === "true";
+
 const seedTopics: Topic[] = [
   {
     id: "topic-ad-security",
@@ -214,7 +216,7 @@ function buildLocalClient(): DataClient {
 }
 
 export async function createDataClient(forceLocal = false): Promise<DataClient> {
-  if (forceLocal) {
+  if (forceLocal || forceLocalStorageMode) {
     return buildLocalClient();
   }
   try {
