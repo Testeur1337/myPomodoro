@@ -17,7 +17,8 @@ const defaultSettings: Settings = {
   useLocalStorageFallback: false
 };
 
-const forceLocalStorageMode = import.meta.env.VITE_FORCE_LOCAL_STORAGE === "true";
+const forceLocalStorageMode = process.env.NEXT_PUBLIC_FORCE_LOCAL_STORAGE === "true";
+
 
 const seedTopics: Topic[] = [
   {
