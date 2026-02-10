@@ -1,0 +1,12 @@
+[build]
+  base = "next-client"
+  command = "npm run build"
+  publish = "out"
+
+[build.environment]
+  NEXT_PUBLIC_FORCE_LOCAL_STORAGE = "true"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
