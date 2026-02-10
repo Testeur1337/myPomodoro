@@ -45,8 +45,7 @@ export default function StatsDashboard({
 
   const mostFocusedTopic = topicTotals.sort((a, b) => b.value - a.value)[0]?.name ?? "—";
 
-  const streakDays = Array.from({ length: 14 }).reduce<number>((count, _, index) => {
-  const streakDays = Array.from({ length: 14 }).reduce((count, _, index) => {
+  const streakDays = Array.from({ length: 14 }).reduce((count: number, _, index) => {
     const date = startOfDay(addDays(new Date(), -index));
     const minutes = sessions
       .filter((session) => session.type === "focus")
