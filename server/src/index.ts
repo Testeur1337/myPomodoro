@@ -26,6 +26,13 @@ const port = Number(process.env.PORT) || 5174;
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
+app.use("/api", (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  next();
+});
+
 const goalPayloadSchema = z.object({ name: z.string().min(1), description: z.string().optional().default("") });
 const projectPayloadSchema = z.object({ goalId: z.string(), name: z.string().min(1), description: z.string().optional().default(""), color: z.string().optional().default("") });
 const topicPayloadSchema = z.object({ name: z.string().min(1), color: z.string().min(1), projectId: z.string().nullable().optional() });
@@ -236,7 +243,25 @@ app.post("/api/import", async (req, res) => {
 app.get("/api/export", async (_req, res) => res.json(await exportAll()));
 
 const clientDist = path.resolve(__dirname, "../../client/dist");
-app.use(express.static(clientDist));
-app.get("*", (_req, res) => res.sendFile(path.join(clientDist, "index.html")));
+app.use(express.static(clientDist, {
+  setHeaders: (res, servedPath) => {
+    if (servedPath.endsWith("index.html")) {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+      return;
+    }
+
+    if (servedPath.includes(`${path.sep}assets${path.sep}`)) {
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    }
+  }
+}));
+app.get("*", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.sendFile(path.join(clientDist, "index.html"));
+});
 
 initializeData().then(() => app.listen(port, () => console.log(`Server listening on http://localhost:${port}`)));
