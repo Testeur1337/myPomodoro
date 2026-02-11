@@ -33,7 +33,7 @@ export interface Project {
 
 export interface Topic {
   id: string;
-  projectId: string | null;
+  projectId: string;
   name: string;
   color: string;
   createdAt: string;

@@ -97,7 +97,9 @@ export default function SetupWizard({ initialSettings, onComplete }: SetupWizard
                       id: crypto.randomUUID(),
                       name: topicName.trim(),
                       color: "#38bdf8",
-                      createdAt: new Date().toISOString()
+                      createdAt: new Date().toISOString(),
+                      projectId: "p-unassigned",
+                      archived: false
                     }
                   ]);
                   setTopicName("");

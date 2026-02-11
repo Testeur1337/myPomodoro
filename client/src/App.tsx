@@ -52,6 +52,8 @@ interface ScopeFilter {
   topicId: string;
 }
 
+const lastTimerTopicStorageKey = "mypomodoro.timer.lastTopicId";
+
 export default function App() {
   const [client, setClient] = useState<DataClient | null>(null);
   const [settings, setSettings] = useState(defaultSettings);
@@ -76,10 +78,18 @@ export default function App() {
     () => activeProjects.filter((p) => !timer.currentGoalId || p.goalId === timer.currentGoalId),
     [activeProjects, timer.currentGoalId]
   );
-  const timerTopics = useMemo(
-    () => activeTopics.filter((t) => !timer.currentProjectId || t.projectId === timer.currentProjectId),
-    [activeTopics, timer.currentProjectId]
-  );
+  const timerTopics = useMemo(() => {
+    if (timer.currentProjectId) {
+      return activeTopics.filter((t) => t.projectId === timer.currentProjectId);
+    }
+
+    if (timer.currentGoalId) {
+      const goalProjectIds = new Set(timerProjects.map((project) => project.id));
+      return activeTopics.filter((topic) => goalProjectIds.has(topic.projectId));
+    }
+
+    return activeTopics;
+  }, [activeTopics, timer.currentGoalId, timer.currentProjectId, timerProjects]);
 
   const scopedProjects = useMemo(
     () => activeProjects.filter((p) => !scope.goalId || p.goalId === scope.goalId),
@@ -125,6 +135,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const storedTopicId = localStorage.getItem(lastTimerTopicStorageKey);
+    if (!storedTopicId) return;
+    setTimer((prev) => ({ ...prev, currentTopicId: storedTopicId }));
+  }, []);
+
+  useEffect(() => {
+    if (!timer.currentTopicId) return;
+    localStorage.setItem(lastTimerTopicStorageKey, timer.currentTopicId);
+  }, [timer.currentTopicId]);
+
+  useEffect(() => {
     if (!timer.isRunning) {
       return;
     }
@@ -145,13 +166,10 @@ export default function App() {
       return;
     }
     const now = new Date();
-    const topic = activeTopics.find((t) => t.id === state.currentTopicId) ?? null;
+    const isFocus = state.phase === "focus";
     const created = await client.createSession({
-      type: state.phase === "focus" ? "focus" : "break",
-      goalId: state.currentGoalId,
-      projectId: state.currentProjectId,
-      topicId: state.currentTopicId,
-      topicName: topic?.name ?? null,
+      type: isFocus ? "focus" : "break",
+      topicId: isFocus ? state.currentTopicId : null,
       note: null,
       rating: null,
       startTime: new Date(now.getTime() - phaseSeconds(settings, state.phase) * 1000).toISOString(),
@@ -422,14 +440,15 @@ export default function App() {
               <select
                 className="w-full rounded bg-slate-950 p-2"
                 value={timer.currentGoalId ?? ""}
-                onChange={(e) =>
+                onChange={(e) => {
+                  const nextGoalId = e.target.value || null;
                   setTimer((prev) => ({
                     ...prev,
-                    currentGoalId: e.target.value || null,
+                    currentGoalId: nextGoalId,
                     currentProjectId: null,
                     currentTopicId: null
-                  }))
-                }
+                  }));
+                }}
               >
                 <option value="">Goal</option>
                 {activeGoals.map((g) => (
@@ -557,7 +576,7 @@ export default function App() {
             />
             <EntityCard
               title="Projects"
-              items={activeProjects.filter((p) => !timer.currentGoalId || p.goalId === timer.currentGoalId)}
+              items={activeProjects}
               onAdd={async (name) => {
                 if (!client) return false;
                 const goalId = timer.currentGoalId ?? activeGoals[0]?.id;
@@ -579,9 +598,9 @@ export default function App() {
             />
             <EntityCard
               title="Topics"
-              items={activeTopics.filter((t) => !timer.currentProjectId || t.projectId === timer.currentProjectId)}
+              items={activeTopics}
               onAdd={async (name) => {
-                if (!client) return false;
+                if (!client || !timer.currentProjectId) return false;
                 const created = await client.createTopic({ name, color: "#22c55e", projectId: timer.currentProjectId });
                 setTopics((prev) => [...prev, created]);
                 return true;
