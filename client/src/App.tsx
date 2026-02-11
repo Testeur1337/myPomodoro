@@ -419,7 +419,6 @@ export default function App() {
               <div>Phase: {timer.phase}</div>
               <button
                 className="mr-2 rounded bg-emerald-500 px-4 py-2 text-black"
-                disabled={timer.phase === "focus" && !timer.currentTopicId}
                 onClick={() => setTimer((prev) => ({ ...prev, isRunning: !prev.isRunning }))}
               >
                 {timer.isRunning ? "Pause" : "Start"}
