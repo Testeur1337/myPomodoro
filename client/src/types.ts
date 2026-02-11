@@ -13,19 +13,42 @@ export interface Settings {
   useLocalStorageFallback: boolean;
 }
 
+export interface Goal {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  archived: boolean;
+}
+
+export interface Project {
+  id: string;
+  goalId: string;
+  name: string;
+  description?: string;
+  color?: string;
+  createdAt: string;
+  archived: boolean;
+}
+
 export interface Topic {
   id: string;
+  projectId: string | null;
   name: string;
   color: string;
   createdAt: string;
+  archived: boolean;
 }
 
 export interface SessionRecord {
   id: string;
   type: SessionType;
+  goalId: string | null;
+  projectId: string | null;
   topicId?: string | null;
   topicName?: string | null;
   note?: string | null;
+  rating?: 1 | 2 | 3 | 4 | 5 | null;
   startTime: string;
   endTime: string;
   durationSeconds: number;
@@ -34,6 +57,8 @@ export interface SessionRecord {
 
 export interface ExportPayload {
   settings: Settings;
+  goals: Goal[];
+  projects: Project[];
   topics: Topic[];
   sessions: SessionRecord[];
 }
@@ -46,6 +71,8 @@ export interface TimerState {
   isRunning: boolean;
   startedAt: string | null;
   phaseStartedAt: string | null;
+  currentGoalId: string | null;
+  currentProjectId: string | null;
   currentTopicId: string | null;
   completedFocusSessions: number;
 }
