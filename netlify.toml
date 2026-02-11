@@ -1,7 +1,6 @@
 [build]
-  base = "next-client"
-  command = "npm run build"
-  publish = "out"
+  command = "npm run build --prefix next-client"
+  publish = "next-client/out"
 
 [build.environment]
   NEXT_PUBLIC_FORCE_LOCAL_STORAGE = "true"

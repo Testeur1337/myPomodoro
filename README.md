@@ -4,10 +4,11 @@ A fast, GoodTime-inspired Pomodoro web app with rich stats, local JSON persisten
 
 ## Features
 - Pomodoro timer with configurable focus, short break, and long break durations.
-- Long break interval control, auto-start toggles, keyboard shortcuts.
-- Topics/tags with per-topic stats.
-- Dashboard: daily stats, streaks, charts, history table, and trends.
-- Export/import JSON backups.
+- Hierarchical planning: Goal -> Project -> Topic with archive support.
+- Session quality rating (1-5) + notes captured after focus sessions.
+- Analytics tab with 365-day heatmap calendar, weekly review dashboard, and deterministic smart insights.
+- History editing for notes, ratings, and hierarchy assignment.
+- Export/import JSON backups including goals/projects/topics/sessions/settings.
 - Local server mode (JSON files) or pure static mode (localStorage fallback).
 
 ## Tech Stack
@@ -40,6 +41,8 @@ All data is stored as JSON in:
 ```
 /server/data/
   settings.json
+  goals.json
+  projects.json
   topics.json
   sessions.json
 ```
@@ -87,11 +90,19 @@ It is intentionally configured to run entirely in the browser with localStorage.
 4. Select the branch you want to deploy (usually `main`).
 
 ### 3) Set build configuration in Netlify UI
+### Netlify build source of truth (important)
+Use Netlify **UI settings** exactly as below (or clear them so `netlify.toml` is used):
+- Base directory: *(empty)*
+- Build command: `npm run build --prefix next-client`
+- Publish directory: `next-client/out`
+
+If Base/Build/Publish are set in the UI, they can override file-based config and deploy an older app variant.
+
 Use these values:
 
-- **Base directory:** `next-client`
-- **Build command:** `npm run build`
-- **Publish directory:** `out`
+- **Base directory:** *(empty)*
+- **Build command:** `npm run build --prefix next-client`
+- **Publish directory:** `next-client/out`
 
 These values match the checked-in `netlify.toml`.
 
@@ -152,11 +163,19 @@ After deployment, verify:
 ```
 GET  /api/settings
 PUT  /api/settings
-GET  /api/topics
+GET  /api/goals
+POST /api/goals
+PUT  /api/goals/:id
+DELETE /api/goals/:id
+GET  /api/projects?goalId=
+POST /api/projects
+PUT  /api/projects/:id
+DELETE /api/projects/:id
+GET  /api/topics?goalId=&projectId=
 POST /api/topics
 PUT  /api/topics/:id
 DELETE /api/topics/:id
-GET  /api/sessions?from=&to=&topicId=&type=
+GET  /api/sessions?from=&to=&type=&topicId=&projectId=&goalId=
 POST /api/sessions
 PUT  /api/sessions/:id
 DELETE /api/sessions/:id
