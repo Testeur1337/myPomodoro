@@ -1,552 +1,174 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createDataClient, DataClient } from "./utils/dataClient";
-import { SessionRecord, Settings, TimerPhase, TimerState, Topic } from "./types";
-import TimerPanel from "./components/TimerPanel";
-import TopicsPanel from "./components/TopicsPanel";
-import StatsDashboard from "./components/StatsDashboard";
+import { useEffect, useMemo, useState } from "react";
+import { addDays, endOfWeek, format, isSameDay, parseISO, startOfDay, startOfWeek, subDays } from "date-fns";
+import { Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import SettingsPanel from "./components/SettingsPanel";
-import SetupWizard from "./components/SetupWizard";
-import { formatMinutes } from "./utils/time";
+import { DataClient, createDataClient } from "./utils/dataClient";
+import { Goal, Project, SessionRecord, Settings, TimerPhase, TimerState, Topic } from "./types";
+import { formatDuration } from "./utils/time";
 
-const TIMER_KEY = "mypomodoro.timerState";
-const SETUP_KEY = "mypomodoro.setupComplete";
+const defaultSettings: Settings = { focusMinutes: 25, shortBreakMinutes: 5, longBreakMinutes: 15, longBreakInterval: 4, autoStartBreaks: true, autoStartFocus: false, trackBreaks: true, dailyGoalMinutes: 120, streakGoalMinutes: 60, useLocalStorageFallback: false };
+const phaseSeconds = (s: Settings, p: TimerPhase) => (p === "focus" ? s.focusMinutes * 60 : p === "shortBreak" ? s.shortBreakMinutes * 60 : s.longBreakMinutes * 60);
 
-const defaultSettings: Settings = {
-  focusMinutes: 25,
-  shortBreakMinutes: 5,
-  longBreakMinutes: 15,
-  longBreakInterval: 4,
-  autoStartBreaks: true,
-  autoStartFocus: false,
-  trackBreaks: true,
-  dailyGoalMinutes: 120,
-  streakGoalMinutes: 60,
-  useLocalStorageFallback: false
-};
+const initialTimer: TimerState = { phase: "focus", remainingSeconds: 25 * 60, isRunning: false, startedAt: null, phaseStartedAt: null, currentGoalId: null, currentProjectId: null, currentTopicId: null, completedFocusSessions: 0 };
 
-function getPhaseDuration(settings: Settings, phase: TimerPhase) {
-  if (phase === "focus") return settings.focusMinutes * 60;
-  if (phase === "shortBreak") return settings.shortBreakMinutes * 60;
-  return settings.longBreakMinutes * 60;
-}
-
-function createInitialTimerState(settings: Settings, currentTopicId: string | null): TimerState {
-  return {
-    phase: "focus",
-    remainingSeconds: getPhaseDuration(settings, "focus"),
-    isRunning: false,
-    startedAt: null,
-    phaseStartedAt: null,
-    currentTopicId,
-    completedFocusSessions: 0
-  };
-}
-
-function loadStoredTimer(settings: Settings, currentTopicId: string | null) {
-  const stored = localStorage.getItem(TIMER_KEY);
-  if (!stored) {
-    return createInitialTimerState(settings, currentTopicId);
-  }
-  try {
-    const parsed = JSON.parse(stored) as TimerState;
-    return { ...createInitialTimerState(settings, currentTopicId), ...parsed };
-  } catch (error) {
-    return createInitialTimerState(settings, currentTopicId);
-  }
-}
-
-function saveTimerState(state: TimerState) {
-  localStorage.setItem(TIMER_KEY, JSON.stringify(state));
-}
-
-async function reconcileElapsed(
-  state: TimerState,
-  settings: Settings,
-  client: DataClient | null,
-  currentTopic: Topic | null,
-  appendSession: (session: SessionRecord) => void
-) {
-  if (!state.isRunning || !state.startedAt) {
-    return state;
-  }
-  const now = Date.now();
-  let elapsed = Math.floor((now - new Date(state.startedAt).getTime()) / 1000);
-  if (elapsed <= 0) {
-    return state;
-  }
-  let nextState = { ...state };
-  while (elapsed >= nextState.remainingSeconds) {
-    const durationSeconds = getPhaseDuration(settings, nextState.phase);
-    const phaseEndTime = new Date(now - (elapsed - nextState.remainingSeconds) * 1000);
-    const phaseStartTime = new Date(phaseEndTime.getTime() - durationSeconds * 1000).toISOString();
-    const phaseEndIso = phaseEndTime.toISOString();
-    if (client) {
-      if (nextState.phase === "focus") {
-        const newSession = await client.createSession({
-          type: "focus",
-          topicId: nextState.currentTopicId,
-          topicName: currentTopic?.name ?? null,
-          note: null,
-          startTime: phaseStartTime,
-          endTime: phaseEndIso,
-          durationSeconds
-        });
-        appendSession(newSession);
-      } else if (settings.trackBreaks) {
-        const newSession = await client.createSession({
-          type: "break",
-          topicId: nextState.currentTopicId,
-          topicName: currentTopic?.name ?? null,
-          note: null,
-          startTime: phaseStartTime,
-          endTime: phaseEndIso,
-          durationSeconds
-        });
-        appendSession(newSession);
-      }
-    }
-    elapsed -= nextState.remainingSeconds;
-    const nextFocusCount =
-      nextState.phase === "focus"
-        ? nextState.completedFocusSessions + 1
-        : nextState.completedFocusSessions;
-    const nextPhase: TimerPhase =
-      nextState.phase === "focus"
-        ? nextFocusCount % settings.longBreakInterval === 0
-          ? "longBreak"
-          : "shortBreak"
-        : "focus";
-    nextState = {
-      ...nextState,
-      phase: nextPhase,
-      remainingSeconds: getPhaseDuration(settings, nextPhase),
-      completedFocusSessions: nextFocusCount,
-      phaseStartedAt: null
-    };
-  }
-  const remainingSeconds = Math.max(1, nextState.remainingSeconds - elapsed);
-  const phaseDuration = getPhaseDuration(settings, nextState.phase);
-  const phaseStartedAt = new Date(now - (phaseDuration - remainingSeconds) * 1000).toISOString();
-  return {
-    ...nextState,
-    remainingSeconds,
-    startedAt: new Date().toISOString(),
-    phaseStartedAt
-  };
-}
-
-function playChime() {
-  try {
-    const audioContext = new AudioContext();
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.value = 880;
-    oscillator.connect(gain);
-    gain.connect(audioContext.destination);
-    oscillator.start();
-    gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 1);
-    oscillator.stop(audioContext.currentTime + 1);
-  } catch (error) {
-    // ignore
-  }
-}
-
-function notify(title: string, body: string) {
-  if ("Notification" in window) {
-    if (Notification.permission === "granted") {
-      new Notification(title, { body });
-    } else if (Notification.permission !== "denied") {
-      Notification.requestPermission().then((permission) => {
-        if (permission === "granted") {
-          new Notification(title, { body });
-        }
-      });
-    }
-  }
-  playChime();
-}
+const clamp5 = (n: number) => Math.max(1, Math.min(5, Math.round(n))) as 1 | 2 | 3 | 4 | 5;
 
 export default function App() {
   const [client, setClient] = useState<DataClient | null>(null);
-  const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [settings, setSettings] = useState(defaultSettings);
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [topics, setTopics] = useState<Topic[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
-  const [timerState, setTimerState] = useState<TimerState>(createInitialTimerState(settings, null));
-  const [activeTab, setActiveTab] = useState("timer");
-  const [showWizard, setShowWizard] = useState(false);
-  const intervalRef = useRef<number | null>(null);
+  const [tab, setTab] = useState("timer");
+  const [timer, setTimer] = useState<TimerState>(initialTimer);
+  const [ratingTarget, setRatingTarget] = useState<SessionRecord | null>(null);
+  const [draftRating, setDraftRating] = useState<1 | 2 | 3 | 4 | 5>(4);
+  const [draftNote, setDraftNote] = useState("");
+  const [weekStart, setWeekStart] = useState(format(startOfWeek(new Date(), { weekStartsOn: 1 }), "yyyy-MM-dd"));
 
-  const currentTopic = useMemo(
-    () => topics.find((topic) => topic.id === timerState.currentTopicId) ?? null,
-    [topics, timerState.currentTopicId]
-  );
+  const activeGoals = goals.filter((g) => !g.archived);
+  const activeProjects = projects.filter((p) => !p.archived);
+  const activeTopics = topics.filter((t) => !t.archived);
+  const selectedGoal = activeGoals.find((g) => g.id === timer.currentGoalId) ?? null;
+  const scopedProjects = activeProjects.filter((p) => p.goalId === timer.currentGoalId);
+  const scopedTopics = activeTopics.filter((t) => t.projectId === timer.currentProjectId);
 
-  const syncTimerState = useCallback((state: TimerState) => {
-    setTimerState(state);
-    saveTimerState(state);
-  }, []);
+  const loadAll = async (dc: DataClient) => {
+    const [s, g, p, t, sess] = await Promise.all([dc.getSettings(), dc.getGoals(), dc.getProjects(), dc.getTopics(), dc.getSessions()]);
+    setSettings(s); setGoals(g); setProjects(p); setTopics(t); setSessions(sess);
+    setTimer((prev) => ({ ...prev, remainingSeconds: phaseSeconds(s, prev.phase), currentGoalId: prev.currentGoalId ?? g.find((x) => !x.archived)?.id ?? null }));
+  };
 
-  const loadData = useCallback(
-    async (selectedClient: DataClient) => {
-      const [loadedSettings, loadedTopics, loadedSessions] = await Promise.all([
-        selectedClient.getSettings(),
-        selectedClient.getTopics(),
-        selectedClient.getSessions()
-      ]);
-      setSettings(loadedSettings);
-      setTopics(loadedTopics);
-      setSessions(loadedSessions);
-      const initialTopicId = loadedTopics[0]?.id ?? null;
-      const storedTimer = loadStoredTimer(loadedSettings, initialTopicId);
-      const reconciled = await reconcileElapsed(
-        storedTimer,
-        loadedSettings,
-        selectedClient,
-        loadedTopics.find((topic) => topic.id === storedTimer.currentTopicId) ?? null,
-        (session) => setSessions((prev) => [...prev, session])
-      );
-      syncTimerState(reconciled);
-      setShowWizard(!localStorage.getItem(SETUP_KEY));
-    },
-    [syncTimerState]
-  );
-
-  const handlePhaseCompletion = useCallback(
-    (recordSessions = true, stateOverride?: TimerState) => {
-      const activeState = stateOverride ?? timerState;
-      const now = new Date();
-      const phaseStart =
-        activeState.phaseStartedAt ?? new Date(now.getTime() - activeState.remainingSeconds * 1000).toISOString();
-      const durationSeconds = getPhaseDuration(settings, activeState.phase);
-
-      if (client && recordSessions) {
-        if (activeState.phase === "focus") {
-          client
-            .createSession({
-              type: "focus",
-              topicId: activeState.currentTopicId,
-              topicName: currentTopic?.name ?? null,
-              note: null,
-              startTime: phaseStart,
-              endTime: now.toISOString(),
-              durationSeconds
-            })
-            .then((newSession) => setSessions((prev) => [...prev, newSession]));
-        }
-
-        if (activeState.phase !== "focus" && settings.trackBreaks) {
-          client
-            .createSession({
-              type: "break",
-              topicId: activeState.currentTopicId,
-              topicName: currentTopic?.name ?? null,
-              note: null,
-              startTime: phaseStart,
-              endTime: now.toISOString(),
-              durationSeconds
-            })
-            .then((newSession) => setSessions((prev) => [...prev, newSession]));
-        }
-      }
-
-      const nextFocusCount =
-        activeState.phase === "focus" ? activeState.completedFocusSessions + 1 : activeState.completedFocusSessions;
-      const nextPhase: TimerPhase =
-        activeState.phase === "focus"
-          ? nextFocusCount % settings.longBreakInterval === 0
-            ? "longBreak"
-            : "shortBreak"
-          : "focus";
-
-      const shouldAutoStart =
-        nextPhase === "focus" ? settings.autoStartFocus : settings.autoStartBreaks;
-
-      if (recordSessions) {
-        notify(
-          nextPhase === "focus" ? "Break complete" : "Focus complete",
-          nextPhase === "focus" ? "Time to focus again." : "Take a short break."
-        );
-      }
-
-      const updated: TimerState = {
-        phase: nextPhase,
-        remainingSeconds: getPhaseDuration(settings, nextPhase),
-        isRunning: shouldAutoStart,
-        startedAt: shouldAutoStart ? new Date().toISOString() : null,
-        phaseStartedAt: shouldAutoStart ? new Date().toISOString() : null,
-        currentTopicId: activeState.currentTopicId,
-        completedFocusSessions: nextFocusCount
-      };
-
-      syncTimerState(updated);
-    },
-    [client, currentTopic?.name, settings, syncTimerState, timerState]
-  );
+  useEffect(() => { createDataClient(false).then((dc) => { setClient(dc); loadAll(dc); }); }, []);
 
   useEffect(() => {
-    createDataClient(false).then((selectedClient) => {
-      setClient(selectedClient);
-      loadData(selectedClient);
-    });
-  }, [loadData]);
+    if (!timer.isRunning) return;
+    const id = window.setInterval(() => setTimer((prev) => {
+      if (prev.remainingSeconds > 1) return { ...prev, remainingSeconds: prev.remainingSeconds - 1 };
+      completePhase(prev);
+      return prev;
+    }), 1000);
+    return () => window.clearInterval(id);
+  }, [timer.isRunning, settings]);
 
-  useEffect(() => {
-    if (!timerState.isRunning || !timerState.startedAt) {
-      return;
+  const completePhase = async (state: TimerState) => {
+    if (!client) return;
+    const now = new Date();
+    const topic = activeTopics.find((t) => t.id === state.currentTopicId) ?? null;
+    const newSession = await client.createSession({
+      type: state.phase === "focus" ? "focus" : "break",
+      goalId: state.currentGoalId,
+      projectId: state.currentProjectId,
+      topicId: state.currentTopicId,
+      topicName: topic?.name ?? null,
+      note: null,
+      rating: null,
+      startTime: new Date(now.getTime() - phaseSeconds(settings, state.phase) * 1000).toISOString(),
+      endTime: now.toISOString(),
+      durationSeconds: phaseSeconds(settings, state.phase)
+    });
+    setSessions((prev) => [...prev, newSession]);
+    if (newSession.type === "focus") { setRatingTarget(newSession); setDraftNote(newSession.note ?? ""); }
+    const focusCount = state.phase === "focus" ? state.completedFocusSessions + 1 : state.completedFocusSessions;
+    const nextPhase: TimerPhase = state.phase === "focus" ? (focusCount % settings.longBreakInterval === 0 ? "longBreak" : "shortBreak") : "focus";
+    setTimer((prev) => ({ ...prev, phase: nextPhase, remainingSeconds: phaseSeconds(settings, nextPhase), isRunning: nextPhase === "focus" ? settings.autoStartFocus : settings.autoStartBreaks, completedFocusSessions: focusCount }));
+  };
+
+  const buckets = useMemo(() => {
+    const map = new Map<string, { date: string; minutes: number; count: number }>();
+    for (let i = 364; i >= 0; i -= 1) {
+      const d = format(subDays(new Date(), i), "yyyy-MM-dd");
+      map.set(d, { date: d, minutes: 0, count: 0 });
     }
-
-    if (intervalRef.current) {
-      window.clearInterval(intervalRef.current);
-    }
-
-    intervalRef.current = window.setInterval(() => {
-      setTimerState((prev) => {
-        if (!prev.isRunning || !prev.startedAt) {
-          return prev;
-        }
-        const now = Date.now();
-        const elapsed = Math.floor((now - new Date(prev.startedAt).getTime()) / 1000);
-        if (elapsed <= 0) {
-          return prev;
-        }
-        const remaining = prev.remainingSeconds - elapsed;
-        if (remaining <= 0) {
-          const updated = {
-            ...prev,
-            remainingSeconds: 0,
-            isRunning: false,
-            startedAt: null
-          };
-          saveTimerState(updated);
-          window.setTimeout(() => handlePhaseCompletion(true, updated), 0);
-          return updated;
-        }
-        const updated = { ...prev, remainingSeconds: remaining, startedAt: new Date().toISOString() };
-        saveTimerState(updated);
-        return updated;
-      });
-    }, 1000);
-
-    return () => {
-      if (intervalRef.current) {
-        window.clearInterval(intervalRef.current);
-      }
-    };
-  }, [handlePhaseCompletion, timerState.isRunning, timerState.startedAt]);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
-        return;
-      }
-      if (event.code === "Space") {
-        event.preventDefault();
-        handleStartPause();
-      }
-      if (event.key.toLowerCase() === "n") {
-        handleSkip();
-      }
-      if (event.key.toLowerCase() === "r") {
-        handleReset();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  });
-
-  const handleStartPause = useCallback(() => {
-    syncTimerState({
-      ...timerState,
-      isRunning: !timerState.isRunning,
-      startedAt: !timerState.isRunning ? new Date().toISOString() : null,
-      phaseStartedAt: timerState.phaseStartedAt ?? new Date().toISOString()
+    sessions.filter((s) => s.type === "focus").forEach((s) => {
+      const key = format(parseISO(s.startTime), "yyyy-MM-dd");
+      const entry = map.get(key);
+      if (!entry) return;
+      entry.minutes += s.durationSeconds / 60;
+      entry.count += 1;
     });
-  }, [syncTimerState, timerState]);
-
-  const handleSkip = useCallback(() => {
-    syncTimerState({
-      ...timerState,
-      remainingSeconds: 0,
-      isRunning: false,
-      startedAt: null
-    });
-    handlePhaseCompletion(false);
-  }, [handlePhaseCompletion, syncTimerState, timerState]);
-
-  const handleReset = useCallback(() => {
-    syncTimerState({
-      ...timerState,
-      remainingSeconds: getPhaseDuration(settings, timerState.phase),
-      isRunning: false,
-      startedAt: null,
-      phaseStartedAt: null
-    });
-  }, [settings, syncTimerState, timerState]);
-
-  const handleTopicChange = useCallback(
-    (topicId: string) => {
-      syncTimerState({ ...timerState, currentTopicId: topicId || null });
-    },
-    [syncTimerState, timerState]
-  );
-
-  const handleSaveSettings = async (updated: Settings) => {
-    if (!client) return;
-    const saved = await client.updateSettings(updated);
-    setSettings(saved);
-    if (updated.useLocalStorageFallback) {
-      const localClient = await createDataClient(true);
-      setClient(localClient);
-      loadData(localClient);
-    } else {
-      const refreshedClient = await createDataClient(false);
-      setClient(refreshedClient);
-      loadData(refreshedClient);
-    }
-  };
-
-  const handleCreateTopic = async (payload: Pick<Topic, "name" | "color">) => {
-    if (!client) return;
-    const created = await client.createTopic(payload);
-    setTopics((prev) => [...prev, created]);
-  };
-
-  const handleUpdateTopic = async (id: string, payload: Pick<Topic, "name" | "color">) => {
-    if (!client) return;
-    const updated = await client.updateTopic(id, payload);
-    setTopics((prev) => prev.map((topic) => (topic.id === id ? updated : topic)));
-  };
-
-  const handleDeleteTopic = async (id: string) => {
-    if (!client) return;
-    await client.deleteTopic(id);
-    setTopics((prev) => prev.filter((topic) => topic.id !== id));
-  };
-
-  const handleUpdateSession = async (id: string, patch: Partial<Pick<SessionRecord, "topicId" | "topicName" | "note">>) => {
-    if (!client) return;
-    const updated = await client.updateSession(id, patch);
-    setSessions((prev) => prev.map((session) => (session.id === id ? updated : session)));
-  };
-
-  const handleDeleteSession = async (id: string) => {
-    if (!client) return;
-    await client.deleteSession(id);
-    setSessions((prev) => prev.filter((session) => session.id !== id));
-  };
-
-  const handleExport = async () => {
-    if (!client) return;
-    const payload = await client.exportAll();
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `mypomodoro-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleImport = async (file: File) => {
-    if (!client) return;
-    const text = await file.text();
-    const parsed = JSON.parse(text);
-    const imported = await client.importAll(parsed);
-    setSettings(imported.settings);
-    setTopics(imported.topics);
-    setSessions(imported.sessions);
-  };
-
-  const handleWizardComplete = async (wizardSettings: Settings, wizardTopics: Topic[]) => {
-    if (!client) return;
-    await client.updateSettings(wizardSettings);
-    await Promise.all(wizardTopics.map((topic) => client.createTopic({ name: topic.name, color: topic.color })));
-    localStorage.setItem(SETUP_KEY, "true");
-    setShowWizard(false);
-    loadData(client);
-  };
-
-  const sessionSummary = useMemo(() => {
-    const focusMinutes = sessions
-      .filter((session) => session.type === "focus")
-      .reduce((sum, session) => sum + session.durationSeconds / 60, 0);
-    return formatMinutes(Math.round(focusMinutes));
+    return [...map.values()];
   }, [sessions]);
 
+  const weekData = useMemo(() => {
+    const start = startOfWeek(parseISO(`${weekStart}T00:00:00.000Z`), { weekStartsOn: 1 });
+    return Array.from({ length: 7 }, (_, i) => {
+      const day = addDays(start, i);
+      const daySessions = sessions.filter((s) => s.type === "focus" && isSameDay(parseISO(s.startTime), day));
+      const minutes = daySessions.reduce((a, b) => a + b.durationSeconds / 60, 0);
+      return { day: format(day, "EEE"), minutes, sessions: daySessions.length };
+    });
+  }, [sessions, weekStart]);
+
+  const insights = useMemo(() => {
+    const recent = sessions.filter((s) => s.type === "focus" && parseISO(s.startTime) >= subDays(new Date(), 30));
+    const byHour = Array.from({ length: 24 }, (_, h) => ({ h, m: recent.filter((s) => parseISO(s.startTime).getHours() === h).reduce((a, b) => a + b.durationSeconds / 60, 0) }));
+    const bestHour = byHour.sort((a, b) => b.m - a.m)[0];
+    const dow = [0, 1, 2, 3, 4, 5, 6].map((d) => ({ d, m: recent.filter((s) => parseISO(s.startTime).getDay() === d).reduce((a, b) => a + b.durationSeconds / 60, 0) }));
+    const bestDow = dow.sort((a, b) => b.m - a.m)[0];
+    const days = Array.from({ length: 30 }, (_, i) => startOfDay(subDays(new Date(), i)));
+    const consistent = days.filter((d) => recent.some((s) => isSameDay(parseISO(s.startTime), d) && s.durationSeconds / 60 >= 25)).length;
+    const last7 = recent.filter((s) => parseISO(s.startTime) >= subDays(new Date(), 7)).reduce((a, b) => a + b.durationSeconds / 60, 0);
+    const prev7 = recent.filter((s) => parseISO(s.startTime) < subDays(new Date(), 7) && parseISO(s.startTime) >= subDays(new Date(), 14)).reduce((a, b) => a + b.durationSeconds / 60, 0);
+    const trend = prev7 ? ((last7 - prev7) / prev7) * 100 : 0;
+    const morning = recent.filter((s) => parseISO(s.startTime).getHours() < 12).reduce((a, b) => a + b.durationSeconds, 0);
+    const evening = recent.filter((s) => parseISO(s.startTime).getHours() >= 17).reduce((a, b) => a + b.durationSeconds, 0);
+    return { bestHour, bestDow, consistent, trend, periodBias: morning > evening ? "mornings" : "evenings" };
+  }, [sessions]);
+
+  const heatMax = Math.max(...buckets.map((b) => b.minutes), 1);
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="text-3xl font-semibold">MyPomodoro</h1>
-            <p className="text-sm text-slate-400">Focus total: {sessionSummary}</p>
-          </div>
-          <nav className="flex gap-2 rounded-full bg-slate-900/60 p-2">
-            {[
-              { id: "timer", label: "Timer" },
-              { id: "stats", label: "Stats" },
-              { id: "settings", label: "Settings" }
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                className={`rounded-full px-4 py-2 text-sm ${
-                  activeTab === tab.id ? "bg-slate-100 text-slate-950" : "text-slate-300"
-                }`}
-                onClick={() => setActiveTab(tab.id)}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </nav>
+    <div className="min-h-screen bg-slate-950 text-slate-100 p-6">
+      <div className="mx-auto max-w-7xl space-y-6">
+        <header className="flex items-center justify-between"><h1 className="text-2xl font-bold">MyPomodoro</h1>
+          <nav className="flex gap-2">{["timer", "history", "analytics", "planning", "settings"].map((t) => <button key={t} className={`px-3 py-1 rounded ${tab === t ? "bg-white text-black" : "bg-slate-800"}`} onClick={() => setTab(t)}>{t[0].toUpperCase() + t.slice(1)}</button>)}</nav>
         </header>
 
-        <main className="mt-8 flex flex-col gap-8">
-          {activeTab === "timer" && (
-            <div className="grid gap-6 lg:grid-cols-[2fr,1fr]">
-              <TimerPanel
-                settings={settings}
-                topics={topics}
-                timerState={timerState}
-                onStartPause={handleStartPause}
-                onSkip={handleSkip}
-                onReset={handleReset}
-                onTopicChange={handleTopicChange}
-                onToggleAutoBreaks={(value) => handleSaveSettings({ ...settings, autoStartBreaks: value })}
-                onToggleAutoFocus={(value) => handleSaveSettings({ ...settings, autoStartFocus: value })}
-              />
-              <TopicsPanel
-                topics={topics}
-                onCreate={handleCreateTopic}
-                onUpdate={handleUpdateTopic}
-                onDelete={handleDeleteTopic}
-              />
-            </div>
-          )}
+        {tab === "timer" && <section className="grid md:grid-cols-2 gap-4 bg-slate-900/60 rounded-xl p-4">
+          <div className="space-y-3">
+            <div className="text-5xl font-bold">{formatDuration(timer.remainingSeconds)}</div>
+            <div>Phase: {timer.phase}</div>
+            <button className="bg-emerald-500 text-black px-4 py-2 rounded mr-2" disabled={timer.phase === "focus" && !timer.currentTopicId} onClick={() => setTimer((p) => ({ ...p, isRunning: !p.isRunning }))}>{timer.isRunning ? "Pause" : "Start"}</button>
+            <button className="bg-slate-700 px-4 py-2 rounded" onClick={() => setTimer((p) => ({ ...p, remainingSeconds: phaseSeconds(settings, p.phase), isRunning: false }))}>Reset</button>
+          </div>
+          <div className="space-y-2">
+            <select className="w-full bg-slate-950 p-2 rounded" value={timer.currentGoalId ?? ""} onChange={(e) => setTimer((p) => ({ ...p, currentGoalId: e.target.value || null, currentProjectId: null, currentTopicId: null }))}><option value="">Goal</option>{activeGoals.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select>
+            <select className="w-full bg-slate-950 p-2 rounded" value={timer.currentProjectId ?? ""} onChange={(e) => setTimer((p) => ({ ...p, currentProjectId: e.target.value || null, currentTopicId: null }))}><option value="">Project</option>{scopedProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+            <input className="w-full bg-slate-950 p-2 rounded" placeholder="Quick search topic" onChange={(e) => {
+              const found = scopedTopics.find((t) => t.name.toLowerCase().includes(e.target.value.toLowerCase()));
+              if (found) setTimer((p) => ({ ...p, currentTopicId: found.id }));
+            }} />
+            <select className="w-full bg-slate-950 p-2 rounded" value={timer.currentTopicId ?? ""} onChange={(e) => setTimer((p) => ({ ...p, currentTopicId: e.target.value || null }))}><option value="">Topic</option>{scopedTopics.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
+          </div>
+        </section>}
 
-          {activeTab === "stats" && (
-            <StatsDashboard
-              settings={settings}
-              sessions={sessions}
-              topics={topics}
-              onUpdateSession={handleUpdateSession}
-              onDeleteSession={handleDeleteSession}
-            />
-          )}
+        {tab === "history" && <section className="bg-slate-900/60 rounded-xl p-4 overflow-auto"><table className="w-full text-sm"><thead><tr><th>Date</th><th>Topic</th><th>Type</th><th>Min</th><th>Rating</th><th>Note</th></tr></thead><tbody>{sessions.slice().reverse().map((s) => <tr key={s.id}><td>{format(parseISO(s.startTime), "MMM d HH:mm")}</td><td>{s.topicName ?? "-"}</td><td>{s.type}</td><td>{Math.round(s.durationSeconds / 60)}</td><td><select value={s.rating ?? ""} onChange={async (e) => { if (!client) return; const updated = await client.updateSession(s.id, { rating: e.target.value ? clamp5(Number(e.target.value)) : null }); setSessions((prev) => prev.map((x) => x.id === s.id ? updated : x)); }}><option value="">-</option>{[1,2,3,4,5].map((r) => <option key={r} value={r}>{r}</option>)}</select></td><td><input value={s.note ?? ""} onBlur={async (e) => { if (!client) return; const updated = await client.updateSession(s.id, { note: e.target.value }); setSessions((prev) => prev.map((x) => x.id === s.id ? updated : x)); }} defaultValue={s.note ?? ""} /></td></tr>)}</tbody></table></section>}
 
-          {activeTab === "settings" && (
-            <SettingsPanel
-              settings={settings}
-              mode={client?.mode ?? "server"}
-              onSave={handleSaveSettings}
-              onExport={handleExport}
-              onImport={handleImport}
-            />
-          )}
-        </main>
+        {tab === "planning" && <section className="grid md:grid-cols-3 gap-4">
+          <Card title="Goals" items={activeGoals} onAdd={async (name) => { if (!client) return; const g = await client.createGoal({ name, description: "" }); setGoals((p) => [...p, g]); }} onArchive={async (id) => { if (!client) return; await client.deleteGoal(id); setGoals((prev) => prev.map((g) => g.id === id ? { ...g, archived: true } : g)); }} />
+          <Card title="Projects" items={activeProjects.filter((p) => !selectedGoal || p.goalId === selectedGoal.id)} onAdd={async (name) => { if (!client || !timer.currentGoalId) return; const p = await client.createProject({ goalId: timer.currentGoalId, name, description: "", color: "#38bdf8" }); setProjects((x) => [...x, p]); }} onArchive={async (id) => { if (!client) return; await client.deleteProject(id); setProjects((prev) => prev.map((p) => p.id === id ? { ...p, archived: true } : p)); }} />
+          <Card title="Topics" items={activeTopics.filter((t) => !timer.currentProjectId || t.projectId === timer.currentProjectId)} onAdd={async (name) => { if (!client) return; const t = await client.createTopic({ name, color: "#22c55e", projectId: timer.currentProjectId }); setTopics((x) => [...x, t]); }} onArchive={async (id) => { if (!client) return; await client.deleteTopic(id); setTopics((prev) => prev.map((t) => t.id === id ? { ...t, archived: true } : t)); }} />
+        </section>}
+
+        {tab === "analytics" && <section className="space-y-4">
+          <div className="bg-slate-900/60 rounded-xl p-4"><h3 className="font-semibold mb-3">Heatmap (365 days)</h3><div className="grid grid-cols-53 gap-1 overflow-auto">{buckets.map((b) => <div key={b.date} title={`${b.date}: ${Math.round(b.minutes)}m (${b.count})`} className="h-3 w-3 rounded" style={{ backgroundColor: `rgba(34,197,94,${0.15 + (b.minutes / heatMax) * 0.85})` }} />)}</div></div>
+          <div className="bg-slate-900/60 rounded-xl p-4"><h3 className="font-semibold mb-2">Weekly Review</h3><input type="date" className="bg-slate-950 p-2 rounded mb-3" value={weekStart} onChange={(e) => setWeekStart(e.target.value)} /><div className="h-60"><ResponsiveContainer width="100%" height="100%"><BarChart data={weekData}><XAxis dataKey="day" /><YAxis /><Tooltip /><Bar dataKey="minutes" fill="#22c55e" /></BarChart></ResponsiveContainer></div><p>Total: {Math.round(weekData.reduce((a,b)=>a+b.minutes,0))}m | Sessions: {weekData.reduce((a,b)=>a+b.sessions,0)} | Goal completion: {Math.round((weekData.reduce((a,b)=>a+b.minutes,0)/(settings.dailyGoalMinutes*7))*100)}%</p></div>
+          <div className="bg-slate-900/60 rounded-xl p-4"><h3 className="font-semibold mb-2">Smart Insights (30 days)</h3><div className="grid md:grid-cols-3 gap-3 text-sm"><Insight title="Best hour" value={`${insights.bestHour?.h ?? 0}:00`} /><Insight title="Best day" value={["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][insights.bestDow?.d ?? 1]} /><Insight title="Consistency" value={`${insights.consistent}/30 days >= 25m`} /><Insight title="Trend" value={`${insights.trend.toFixed(1)}% vs prior week`} /><Insight title="Focus window" value={`You focus more in ${insights.periodBias}`} /></div><div className="h-52"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={activeTopics.map((t)=>({name:t.name,value:sessions.filter((s)=>s.topicId===t.id&&s.type==='focus').reduce((a,b)=>a+b.durationSeconds/60,0)})).filter((x)=>x.value>0)} dataKey="value" nameKey="name" outerRadius={70}>{activeTopics.map((t, i) => <Cell key={t.id} fill={["#22c55e", "#3b82f6", "#a855f7", "#f97316", "#14b8a6"][i % 5]} />)}</Pie><Tooltip /></PieChart></ResponsiveContainer></div></div>
+        </section>}
+
+        {tab === "settings" && <SettingsPanel settings={settings} mode={client?.mode ?? "server"} onSave={async (s) => { if (!client) return; const saved = await client.updateSettings(s); setSettings(saved); }} onExport={async () => { if (!client) return; const payload = await client.exportAll(); const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "mypomodoro-backup.json"; a.click(); URL.revokeObjectURL(url); }} onImport={async (file) => { if (!client) return; const imported = await client.importAll(JSON.parse(await file.text())); setSettings(imported.settings); setGoals(imported.goals); setProjects(imported.projects); setTopics(imported.topics); setSessions(imported.sessions); }} />}
       </div>
 
-      {showWizard && <SetupWizard initialSettings={settings} onComplete={handleWizardComplete} />}
+      {ratingTarget && <div className="fixed inset-0 bg-black/50 flex items-center justify-center"><div className="bg-slate-900 rounded-xl p-4 space-y-3 w-96"><h3 className="font-semibold">Rate this session (1-5)</h3><input type="range" min={1} max={5} value={draftRating} onChange={(e) => setDraftRating(clamp5(Number(e.target.value)))} className="w-full" /><textarea className="w-full bg-slate-950 rounded p-2" placeholder="Optional note" value={draftNote} onChange={(e) => setDraftNote(e.target.value)} /><div className="flex justify-end gap-2"><button className="px-3 py-1 bg-slate-700 rounded" onClick={() => setRatingTarget(null)}>Skip</button><button className="px-3 py-1 bg-emerald-500 text-black rounded" onClick={async () => { if (!client || !ratingTarget) return; const updated = await client.updateSession(ratingTarget.id, { rating: draftRating, note: draftNote || null }); setSessions((prev) => prev.map((s) => s.id === updated.id ? updated : s)); setRatingTarget(null); }}>Save</button></div></div></div>}
     </div>
   );
 }
+
+function Card({ title, items, onAdd, onArchive }: { title: string; items: Array<{ id: string; name: string }>; onAdd: (name: string) => void; onArchive: (id: string) => void }) {
+  const [name, setName] = useState("");
+  return <div className="bg-slate-900/60 rounded-xl p-4"><h3 className="font-semibold mb-2">{title}</h3><div className="flex gap-2 mb-3"><input className="bg-slate-950 rounded p-2 flex-1" value={name} onChange={(e) => setName(e.target.value)} /><button className="bg-emerald-500 text-black rounded px-3" onClick={() => { if (!name.trim()) return; onAdd(name.trim()); setName(""); }}>Add</button></div><ul className="space-y-1 text-sm">{items.map((item) => <li key={item.id} className="flex justify-between bg-slate-950 rounded px-2 py-1"><span>{item.name}</span><button className="text-rose-300" onClick={() => onArchive(item.id)}>Archive</button></li>)}</ul></div>;
+}
+
+function Insight({ title, value }: { title: string; value: string }) { return <div className="bg-slate-950 rounded p-2"><div className="text-slate-400 text-xs">{title}</div><div>{value}</div></div>; }
