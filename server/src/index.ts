@@ -103,7 +103,10 @@ app.post("/api/projects", async (req, res) => {
 app.put("/api/projects/:id", async (req, res) => {
   const parsed = projectPayloadSchema.extend({ archived: z.boolean().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid project payload" });
-  const projects = await getProjects();
+  const [projects, goals] = await Promise.all([getProjects(), getGoals()]);
+  if (!goals.some((goal) => goal.id === parsed.data.goalId)) {
+    return res.status(400).json({ error: "goalId does not exist" });
+  }
   const idx = projects.findIndex((p) => p.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: "Project not found" });
   projects[idx] = { ...projects[idx], ...parsed.data };
@@ -130,7 +133,10 @@ app.get("/api/topics", async (req, res) => {
 app.post("/api/topics", async (req, res) => {
   const parsed = topicPayloadSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid topic payload" });
-  const topics = await getTopics();
+  const [topics, projects] = await Promise.all([getTopics(), getProjects()]);
+  if (parsed.data.projectId && !projects.some((project) => project.id === parsed.data.projectId)) {
+    return res.status(400).json({ error: "projectId does not exist" });
+  }
   const topic: Topic = { id: `t_${randomUUID()}`, name: parsed.data.name, color: parsed.data.color, projectId: parsed.data.projectId ?? null, createdAt: new Date().toISOString(), archived: false };
   await saveTopics([...topics, topic]);
   res.status(201).json(topic);
@@ -138,7 +144,10 @@ app.post("/api/topics", async (req, res) => {
 app.put("/api/topics/:id", async (req, res) => {
   const parsed = topicPayloadSchema.extend({ archived: z.boolean().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid topic payload" });
-  const topics = await getTopics();
+  const [topics, projects] = await Promise.all([getTopics(), getProjects()]);
+  if (parsed.data.projectId && !projects.some((project) => project.id === parsed.data.projectId)) {
+    return res.status(400).json({ error: "projectId does not exist" });
+  }
   const idx = topics.findIndex((t) => t.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: "Topic not found" });
   topics[idx] = { ...topics[idx], ...parsed.data };
@@ -157,7 +166,17 @@ app.delete("/api/topics/:id", async (req, res) => {
 function resolveHierarchy(input: { topicId?: string | null; projectId?: string | null; goalId?: string | null }, topics: Topic[], projects: Project[]) {
   const topic = input.topicId ? topics.find((t) => t.id === input.topicId) : null;
   if (input.topicId && !topic) throw new Error("topicId does not exist");
-  const project = (topic?.projectId ?? input.projectId) ? projects.find((p) => p.id === (topic?.projectId ?? input.projectId)) : null;
+
+  if (input.projectId && !projects.some((project) => project.id === input.projectId)) {
+    throw new Error("projectId does not exist");
+  }
+
+  const derivedProjectId = topic?.projectId ?? input.projectId ?? null;
+  if (topic?.projectId && input.projectId && input.projectId !== topic.projectId) {
+    throw new Error("topicId does not match projectId");
+  }
+
+  const project = derivedProjectId ? projects.find((p) => p.id === derivedProjectId) : null;
   const goalId = project?.goalId ?? input.goalId ?? null;
   return { topic, project, goalId, projectId: project?.id ?? null };
 }
