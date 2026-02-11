@@ -16,7 +16,18 @@ import { DataClient, createDataClient } from "./utils/dataClient";
 import { Goal, Project, SessionRecord, Settings, TimerPhase, TimerState, Topic } from "./types";
 import { formatDuration } from "./utils/time";
 
-const initialTimer: TimerState = { phase: "focus", remainingSeconds: 25 * 60, isRunning: false, startedAt: null, phaseStartedAt: null, currentGoalId: null, currentProjectId: null, currentTopicId: null, completedFocusSessions: 0 };
+const defaultSettings: Settings = {
+  focusMinutes: 25,
+  shortBreakMinutes: 5,
+  longBreakMinutes: 15,
+  longBreakInterval: 4,
+  autoStartBreaks: true,
+  autoStartFocus: false,
+  trackBreaks: true,
+  dailyGoalMinutes: 120,
+  streakGoalMinutes: 60,
+  useLocalStorageFallback: false
+};
 
 const initialTimer: TimerState = {
   phase: "focus",
@@ -320,8 +331,6 @@ export default function App() {
   }, [focusSessions]);
 
   const heatMax = Math.max(...heatmap.map((b) => b.minutes), 1);
-
-  const heatMax = Math.max(...buckets.map((b) => b.minutes), 1);
 
   return (
     <div className="min-h-screen bg-slate-950 p-6 text-slate-100">

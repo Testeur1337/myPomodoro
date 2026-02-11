@@ -90,11 +90,19 @@ It is intentionally configured to run entirely in the browser with localStorage.
 4. Select the branch you want to deploy (usually `main`).
 
 ### 3) Set build configuration in Netlify UI
+### Netlify build source of truth (important)
+Use Netlify **UI settings** exactly as below (or clear them so `netlify.toml` is used):
+- Base directory: *(empty)*
+- Build command: `npm run build --prefix next-client`
+- Publish directory: `next-client/out`
+
+If Base/Build/Publish are set in the UI, they can override file-based config and deploy an older app variant.
+
 Use these values:
 
-- **Base directory:** `next-client`
-- **Build command:** `npm run build`
-- **Publish directory:** `out`
+- **Base directory:** *(empty)*
+- **Build command:** `npm run build --prefix next-client`
+- **Publish directory:** `next-client/out`
 
 These values match the checked-in `netlify.toml`.
 
