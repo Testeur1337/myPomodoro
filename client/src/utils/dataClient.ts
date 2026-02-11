@@ -52,7 +52,7 @@ export interface DataClient {
   updateTopic: (id: string, payload: Partial<Topic>) => Promise<Topic>;
   deleteTopic: (id: string) => Promise<void>;
   getSessions: (filters?: Record<string, string>) => Promise<SessionRecord[]>;
-  createSession: (session: Omit<SessionRecord, "id" | "createdAt">) => Promise<SessionRecord>;
+  createSession: (session: Pick<SessionRecord, "type" | "topicId" | "note" | "rating" | "startTime" | "endTime" | "durationSeconds">) => Promise<SessionRecord>;
   updateSession: (id: string, patch: Partial<SessionRecord>) => Promise<SessionRecord>;
   deleteSession: (id: string) => Promise<void>;
   exportAll: () => Promise<ExportPayload>;
@@ -103,7 +103,7 @@ function buildLocalClient(): DataClient {
     const topics = loadLocal(topicsKey, [] as Topic[]);
     const projects = loadLocal(projectsKey, [] as Project[]);
     const goalProjectIds = filters?.goalId ? projects.filter((p) => p.goalId === filters.goalId).map((p) => p.id) : null;
-    return topics.filter((t) => (!filters?.projectId || t.projectId === filters.projectId) && (!goalProjectIds || goalProjectIds.includes(t.projectId ?? "")));
+    return topics.filter((t) => (!filters?.projectId || t.projectId === filters.projectId) && (!goalProjectIds || goalProjectIds.includes(t.projectId)));
   };
   return {
     mode: "local",
@@ -118,11 +118,11 @@ function buildLocalClient(): DataClient {
     updateProject: async (id, payload) => { const all = await getProjects(); const next = all.map((p) => (p.id === id ? { ...p, ...payload } : p)); saveLocal(projectsKey, next); return next.find((p) => p.id === id)!; },
     deleteProject: async (id) => { const all = await getProjects(); saveLocal(projectsKey, all.map((p) => (p.id === id ? { ...p, archived: true } : p))); },
     getTopics,
-    createTopic: async (payload) => { const all = await getTopics(); const entry: Topic = { id: `t_${crypto.randomUUID()}`, name: payload.name, color: payload.color, projectId: payload.projectId ?? null, createdAt: new Date().toISOString(), archived: false }; saveLocal(topicsKey, [...all, entry]); return entry; },
+    createTopic: async (payload) => { if (!payload.projectId) throw new Error("projectId is required"); const all = await getTopics(); const entry: Topic = { id: `t_${crypto.randomUUID()}`, name: payload.name, color: payload.color, projectId: payload.projectId, createdAt: new Date().toISOString(), archived: false }; saveLocal(topicsKey, [...all, entry]); return entry; },
     updateTopic: async (id, payload) => { const all = await getTopics(); const next = all.map((t) => (t.id === id ? { ...t, ...payload } : t)); saveLocal(topicsKey, next); return next.find((t) => t.id === id)!; },
     deleteTopic: async (id) => { const all = await getTopics(); saveLocal(topicsKey, all.map((t) => (t.id === id ? { ...t, archived: true } : t))); },
     getSessions: async () => loadLocal(sessionsKey, [] as SessionRecord[]),
-    createSession: async (session) => { const all = loadLocal(sessionsKey, [] as SessionRecord[]); const entry: SessionRecord = { ...session, id: `s_${crypto.randomUUID()}`, createdAt: new Date().toISOString() }; saveLocal(sessionsKey, [...all, entry]); return entry; },
+    createSession: async (session) => { const all = loadLocal(sessionsKey, [] as SessionRecord[]); if (session.type === "focus" && !session.topicId) throw new Error("Focus sessions require topicId"); const entry: SessionRecord = { ...session, goalId: null, projectId: null, topicName: null, id: `s_${crypto.randomUUID()}`, createdAt: new Date().toISOString() }; saveLocal(sessionsKey, [...all, entry]); return entry; },
     updateSession: async (id, patch) => { const all = loadLocal(sessionsKey, [] as SessionRecord[]); const next = all.map((s) => (s.id === id ? { ...s, ...patch } : s)); saveLocal(sessionsKey, next); return next.find((s) => s.id === id)!; },
     deleteSession: async (id) => saveLocal(sessionsKey, loadLocal(sessionsKey, [] as SessionRecord[]).filter((s) => s.id !== id)),
     exportAll: async () => ({ settings: loadLocal(settingsKey, defaultSettings), goals: await getGoals(), projects: await getProjects(), topics: await getTopics(), sessions: loadLocal(sessionsKey, [] as SessionRecord[]) }),

@@ -10,6 +10,10 @@ const projectsPath = path.join(dataDir, "projects.json");
 const topicsPath = path.join(dataDir, "topics.json");
 const sessionsPath = path.join(dataDir, "sessions.json");
 
+const UNASSIGNED_GOAL_ID = "g-unassigned";
+const UNASSIGNED_PROJECT_ID = "p-unassigned";
+const UNASSIGNED_TOPIC_ID = "t-unassigned";
+
 export const settingsSchema = z.object({
   focusMinutes: z.number().min(1),
   shortBreakMinutes: z.number().min(1),
@@ -43,7 +47,7 @@ export const projectSchema = z.object({
 
 export const topicSchema = z.object({
   id: z.string(),
-  projectId: z.string().nullable(),
+  projectId: z.string(),
   name: z.string().min(1),
   color: z.string().min(1),
   createdAt: z.string(),
@@ -69,8 +73,8 @@ const exportSchema = z.object({
   settings: settingsSchema,
   goals: z.array(goalSchema).optional().default([]),
   projects: z.array(projectSchema).optional().default([]),
-  topics: z.array(topicSchema),
-  sessions: z.array(sessionSchema)
+  topics: z.array(topicSchema).optional().default([]),
+  sessions: z.array(sessionSchema).optional().default([])
 });
 
 let writeQueue: Promise<void> = Promise.resolve();
@@ -129,36 +133,135 @@ function queueWrite(action: () => Promise<void>) {
   return writeQueue;
 }
 
+function normalizeGoals(raw: any[]): Goal[] {
+  return raw.map((goal) => goalSchema.parse({ ...goal, description: goal.description ?? "", archived: goal.archived ?? false }));
+}
+
+function normalizeProjects(raw: any[]): Project[] {
+  return raw.map((project) => projectSchema.parse({ ...project, goalId: project.goalId ?? "", description: project.description ?? "", color: project.color ?? "", archived: project.archived ?? false }));
+}
+
+function normalizeTopics(raw: any[]): Topic[] {
+  return raw.map((topic) => topicSchema.parse({ ...topic, projectId: topic.projectId ?? "", archived: topic.archived ?? false }));
+}
+
+function normalizeSessions(raw: any[]): SessionRecord[] {
+  return raw.map((session) => sessionSchema.parse({ ...session, goalId: session.goalId ?? null, projectId: session.projectId ?? null, topicId: session.topicId ?? null, topicName: session.topicName ?? null, note: session.note ?? null, rating: session.rating ?? null }));
+}
+
+export function migrateHierarchyData(input: { goals: Goal[]; projects: Project[]; topics: Topic[]; sessions: SessionRecord[] }) {
+  const goals = [...input.goals];
+  const projects = [...input.projects];
+  const topics = [...input.topics];
+  const sessions = [...input.sessions];
+
+  const now = new Date().toISOString();
+
+  let unassignedGoal = goals.find((g) => g.id === UNASSIGNED_GOAL_ID) ?? goals.find((g) => g.name === "Unassigned");
+  if (!unassignedGoal) {
+    unassignedGoal = { id: UNASSIGNED_GOAL_ID, name: "Unassigned", description: "", createdAt: now, archived: false };
+    goals.push(unassignedGoal);
+  } else if (unassignedGoal.archived) {
+    unassignedGoal.archived = false;
+  }
+
+  const goalIds = new Set(goals.map((goal) => goal.id));
+
+  let unassignedProject = projects.find((p) => p.id === UNASSIGNED_PROJECT_ID) ?? projects.find((p) => p.name === "Unassigned" && p.goalId === unassignedGoal.id);
+  if (!unassignedProject) {
+    unassignedProject = { id: UNASSIGNED_PROJECT_ID, goalId: unassignedGoal.id, name: "Unassigned", description: "", color: "#64748b", createdAt: now, archived: false };
+    projects.push(unassignedProject);
+  } else {
+    unassignedProject.goalId = goalIds.has(unassignedProject.goalId) ? unassignedProject.goalId : unassignedGoal.id;
+    unassignedProject.archived = false;
+  }
+
+  for (const project of projects) {
+    if (!goalIds.has(project.goalId)) {
+      project.goalId = unassignedGoal.id;
+    }
+  }
+
+  const projectIds = new Set(projects.map((project) => project.id));
+
+  for (const topic of topics) {
+    if (!projectIds.has(topic.projectId)) {
+      topic.projectId = unassignedProject.id;
+    }
+  }
+
+  let unassignedTopic = topics.find((topic) => topic.id === UNASSIGNED_TOPIC_ID) ?? topics.find((topic) => topic.name === "Unassigned Topic" && topic.projectId === unassignedProject.id);
+  if (!unassignedTopic) {
+    unassignedTopic = { id: UNASSIGNED_TOPIC_ID, projectId: unassignedProject.id, name: "Unassigned Topic", color: "#64748b", createdAt: now, archived: false };
+    topics.push(unassignedTopic);
+  } else {
+    unassignedTopic.projectId = unassignedProject.id;
+    unassignedTopic.archived = false;
+  }
+
+  const topicMap = new Map(topics.map((topic) => [topic.id, topic]));
+  const projectMap = new Map(projects.map((project) => [project.id, project]));
+
+  for (const session of sessions) {
+    if (session.type === "focus" && (!session.topicId || !topicMap.has(session.topicId))) {
+      session.topicId = unassignedTopic.id;
+    }
+
+    if (session.topicId && !topicMap.has(session.topicId)) {
+      session.topicId = unassignedTopic.id;
+    }
+
+    if (session.topicId) {
+      const topic = topicMap.get(session.topicId) ?? unassignedTopic;
+      const project = projectMap.get(topic.projectId) ?? unassignedProject;
+      session.topicId = topic.id;
+      session.topicName = topic.name;
+      session.projectId = project.id;
+      session.goalId = project.goalId;
+      continue;
+    }
+
+    session.projectId = null;
+    session.goalId = null;
+    session.topicName = session.topicName ?? null;
+  }
+
+  return {
+    goals: z.array(goalSchema).parse(goals),
+    projects: z.array(projectSchema).parse(projects),
+    topics: z.array(topicSchema).parse(topics),
+    sessions: z.array(sessionSchema).parse(sessions)
+  };
+}
+
+async function persistAll(settings: Settings, data: { goals: Goal[]; projects: Project[]; topics: Topic[]; sessions: SessionRecord[] }) {
+  const migrated = migrateHierarchyData(data);
+  await queueWrite(async () => {
+    await writeJsonAtomic(settingsPath, settingsSchema.parse(settings));
+    await writeJsonAtomic(goalsPath, migrated.goals);
+    await writeJsonAtomic(projectsPath, migrated.projects);
+    await writeJsonAtomic(topicsPath, migrated.topics.length ? migrated.topics : seedTopics);
+    await writeJsonAtomic(sessionsPath, migrated.sessions);
+  });
+  return migrated;
+}
+
 export async function initializeData() {
   await ensureDataDir();
-  const settings = await readJsonFile<Settings>(settingsPath, defaultSettings);
+  const settings = settingsSchema.parse(await readJsonFile<Settings>(settingsPath, defaultSettings));
   const goalsExists = await fs.access(goalsPath).then(() => true).catch(() => false);
   const projectsExists = await fs.access(projectsPath).then(() => true).catch(() => false);
-  const goals = await readJsonFile<Goal[]>(goalsPath, goalsExists ? [] : [seedGoal]);
-  const projects = await readJsonFile<Project[]>(projectsPath, projectsExists ? [] : [seedProject]);
+
+  const rawGoals = await readJsonFile<any[]>(goalsPath, goalsExists ? [] : [seedGoal]);
+  const rawProjects = await readJsonFile<any[]>(projectsPath, projectsExists ? [] : [seedProject]);
   const rawTopics = await readJsonFile<any[]>(topicsPath, seedTopics);
   const rawSessions = await readJsonFile<any[]>(sessionsPath, []);
 
-  const topics = rawTopics.map((topic) => topicSchema.parse({ ...topic, projectId: topic.projectId ?? null, archived: topic.archived ?? false }));
-
-  const sessionMapped = rawSessions.map((session) => {
-    const topic = topics.find((t) => t.id === (session.topicId ?? null));
-    const project = projects.find((p) => p.id === (session.projectId ?? topic?.projectId ?? null));
-    const goal = goals.find((g) => g.id === (session.goalId ?? project?.goalId ?? null));
-    return sessionSchema.parse({
-      ...session,
-      goalId: goal?.id ?? null,
-      projectId: project?.id ?? null,
-      rating: session.rating ?? null
-    });
-  });
-
-  await queueWrite(async () => {
-    await writeJsonAtomic(settingsPath, settingsSchema.parse(settings));
-    await writeJsonAtomic(goalsPath, z.array(goalSchema).parse(goals));
-    await writeJsonAtomic(projectsPath, z.array(projectSchema).parse(projects));
-    await writeJsonAtomic(topicsPath, z.array(topicSchema).parse(topics.length ? topics : seedTopics));
-    await writeJsonAtomic(sessionsPath, z.array(sessionSchema).parse(sessionMapped));
+  await persistAll(settings, {
+    goals: normalizeGoals(rawGoals),
+    projects: normalizeProjects(rawProjects),
+    topics: normalizeTopics(rawTopics),
+    sessions: normalizeSessions(rawSessions)
   });
 }
 
@@ -199,19 +302,19 @@ export const saveSessions = async (sessions: SessionRecord[]) => {
 
 export async function replaceAll(data: ExportPayload) {
   const parsed = exportSchema.parse(data);
-  await queueWrite(async () => {
-    await writeJsonAtomic(settingsPath, parsed.settings);
-    await writeJsonAtomic(goalsPath, parsed.goals ?? []);
-    await writeJsonAtomic(projectsPath, parsed.projects ?? []);
-    await writeJsonAtomic(topicsPath, parsed.topics);
-    await writeJsonAtomic(sessionsPath, parsed.sessions);
-  });
-  return {
-    settings: parsed.settings,
+  const migrated = await persistAll(parsed.settings, {
     goals: parsed.goals ?? [],
     projects: parsed.projects ?? [],
-    topics: parsed.topics,
-    sessions: parsed.sessions
+    topics: parsed.topics ?? [],
+    sessions: parsed.sessions ?? []
+  });
+
+  return {
+    settings: parsed.settings,
+    goals: migrated.goals,
+    projects: migrated.projects,
+    topics: migrated.topics,
+    sessions: migrated.sessions
   };
 }
 
@@ -219,5 +322,6 @@ export async function exportAll(): Promise<ExportPayload> {
   const [settings, goals, projects, topics, sessions] = await Promise.all([
     getSettings(), getGoals(), getProjects(), getTopics(), getSessions()
   ]);
-  return { settings, goals, projects, topics, sessions };
+  const migrated = migrateHierarchyData({ goals, projects, topics, sessions });
+  return { settings, ...migrated };
 }

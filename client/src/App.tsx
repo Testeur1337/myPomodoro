@@ -52,6 +52,8 @@ interface ScopeFilter {
   topicId: string;
 }
 
+const lastTimerTopicStorageKey = "mypomodoro.timer.lastTopicId";
+
 export default function App() {
   const [client, setClient] = useState<DataClient | null>(null);
   const [settings, setSettings] = useState(defaultSettings);
@@ -83,7 +85,7 @@ export default function App() {
 
     if (timer.currentGoalId) {
       const goalProjectIds = new Set(timerProjects.map((project) => project.id));
-      return activeTopics.filter((topic) => topic.projectId !== null && goalProjectIds.has(topic.projectId));
+      return activeTopics.filter((topic) => goalProjectIds.has(topic.projectId));
     }
 
     return activeTopics;
@@ -133,6 +135,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const storedTopicId = localStorage.getItem(lastTimerTopicStorageKey);
+    if (!storedTopicId) return;
+    setTimer((prev) => ({ ...prev, currentTopicId: storedTopicId }));
+  }, []);
+
+  useEffect(() => {
+    if (!timer.currentTopicId) return;
+    localStorage.setItem(lastTimerTopicStorageKey, timer.currentTopicId);
+  }, [timer.currentTopicId]);
+
+  useEffect(() => {
     if (!timer.isRunning) {
       return;
     }
@@ -153,13 +166,10 @@ export default function App() {
       return;
     }
     const now = new Date();
-    const topic = activeTopics.find((t) => t.id === state.currentTopicId) ?? null;
+    const isFocus = state.phase === "focus";
     const created = await client.createSession({
-      type: state.phase === "focus" ? "focus" : "break",
-      goalId: state.currentGoalId,
-      projectId: state.currentProjectId,
-      topicId: state.currentTopicId,
-      topicName: topic?.name ?? null,
+      type: isFocus ? "focus" : "break",
+      topicId: isFocus ? state.currentTopicId : null,
       note: null,
       rating: null,
       startTime: new Date(now.getTime() - phaseSeconds(settings, state.phase) * 1000).toISOString(),
@@ -409,6 +419,7 @@ export default function App() {
               <div>Phase: {timer.phase}</div>
               <button
                 className="mr-2 rounded bg-emerald-500 px-4 py-2 text-black"
+                disabled={timer.phase === "focus" && !timer.currentTopicId}
                 onClick={() => setTimer((prev) => ({ ...prev, isRunning: !prev.isRunning }))}
               >
                 {timer.isRunning ? "Pause" : "Start"}
@@ -432,13 +443,10 @@ export default function App() {
                 value={timer.currentGoalId ?? ""}
                 onChange={(e) => {
                   const nextGoalId = e.target.value || null;
-                  const defaultProjectId = nextGoalId
-                    ? activeProjects.find((project) => project.goalId === nextGoalId)?.id ?? null
-                    : null;
                   setTimer((prev) => ({
                     ...prev,
                     currentGoalId: nextGoalId,
-                    currentProjectId: defaultProjectId,
+                    currentProjectId: null,
                     currentTopicId: null
                   }));
                 }}
