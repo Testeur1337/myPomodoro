@@ -401,7 +401,6 @@ export default function App() {
               <div>Phase: {timer.phase}</div>
               <button
                 className="mr-2 rounded bg-emerald-500 px-4 py-2 text-black"
-                disabled={timer.phase === "focus" && !timer.currentTopicId}
                 onClick={() => setTimer((prev) => ({ ...prev, isRunning: !prev.isRunning }))}
               >
                 {timer.isRunning ? "Pause" : "Start"}
@@ -545,9 +544,10 @@ export default function App() {
               title="Goals"
               items={activeGoals}
               onAdd={async (name) => {
-                if (!client) return;
+                if (!client) return false;
                 const created = await client.createGoal({ name, description: "" });
                 setGoals((prev) => [...prev, created]);
+                return true;
               }}
               onArchive={async (id) => {
                 if (!client) return;
@@ -559,14 +559,17 @@ export default function App() {
               title="Projects"
               items={activeProjects.filter((p) => !timer.currentGoalId || p.goalId === timer.currentGoalId)}
               onAdd={async (name) => {
-                if (!client || !timer.currentGoalId) return;
+                if (!client) return false;
+                const goalId = timer.currentGoalId ?? activeGoals[0]?.id;
+                if (!goalId) return false;
                 const created = await client.createProject({
-                  goalId: timer.currentGoalId,
+                  goalId,
                   name,
                   description: "",
                   color: "#38bdf8"
                 });
                 setProjects((prev) => [...prev, created]);
+                return true;
               }}
               onArchive={async (id) => {
                 if (!client) return;
@@ -578,9 +581,10 @@ export default function App() {
               title="Topics"
               items={activeTopics.filter((t) => !timer.currentProjectId || t.projectId === timer.currentProjectId)}
               onAdd={async (name) => {
-                if (!client) return;
+                if (!client) return false;
                 const created = await client.createTopic({ name, color: "#22c55e", projectId: timer.currentProjectId });
                 setTopics((prev) => [...prev, created]);
+                return true;
               }}
               onArchive={async (id) => {
                 if (!client) return;
@@ -772,7 +776,7 @@ function EntityCard({
 }: {
   title: string;
   items: Array<{ id: string; name: string }>;
-  onAdd: (name: string) => void;
+  onAdd: (name: string) => Promise<boolean>;
   onArchive: (id: string) => void;
 }) {
   const [name, setName] = useState("");
@@ -783,10 +787,12 @@ function EntityCard({
         <input className="flex-1 rounded bg-slate-950 p-2" value={name} onChange={(e) => setName(e.target.value)} />
         <button
           className="rounded bg-emerald-500 px-3 text-black"
-          onClick={() => {
+          onClick={async () => {
             if (!name.trim()) return;
-            onAdd(name.trim());
-            setName("");
+            const wasAdded = await onAdd(name.trim());
+            if (wasAdded) {
+              setName("");
+            }
           }}
         >
           Add
@@ -814,10 +820,3 @@ function Insight({ title, value }: { title: string; value: string }) {
     </div>
   );
 }
-
-function Card({ title, items, onAdd, onArchive }: { title: string; items: Array<{ id: string; name: string }>; onAdd: (name: string) => void; onArchive: (id: string) => void }) {
-  const [name, setName] = useState("");
-  return <div className="bg-slate-900/60 rounded-xl p-4"><h3 className="font-semibold mb-2">{title}</h3><div className="flex gap-2 mb-3"><input className="bg-slate-950 rounded p-2 flex-1" value={name} onChange={(e) => setName(e.target.value)} /><button className="bg-emerald-500 text-black rounded px-3" onClick={() => { if (!name.trim()) return; onAdd(name.trim()); setName(""); }}>Add</button></div><ul className="space-y-1 text-sm">{items.map((item) => <li key={item.id} className="flex justify-between bg-slate-950 rounded px-2 py-1"><span>{item.name}</span><button className="text-rose-300" onClick={() => onArchive(item.id)}>Archive</button></li>)}</ul></div>;
-}
-
-function Insight({ title, value }: { title: string; value: string }) { return <div className="bg-slate-950 rounded p-2"><div className="text-slate-400 text-xs">{title}</div><div>{value}</div></div>; }
