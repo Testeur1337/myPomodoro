@@ -93,7 +93,7 @@ It is intentionally configured to run entirely in the browser with localStorage.
 ### Netlify build source of truth (important)
 Use Netlify **UI settings** exactly as below (or clear them so `netlify.toml` is used):
 - Base directory: *(empty)*
-- Build command: `npm run build --prefix next-client`
+- Build command: `npm install --prefix next-client && npm run build --prefix next-client`
 - Publish directory: `next-client/out`
 
 If Base/Build/Publish are set in the UI, they can override file-based config and deploy an older app variant.
@@ -101,7 +101,7 @@ If Base/Build/Publish are set in the UI, they can override file-based config and
 Use these values:
 
 - **Base directory:** *(empty)*
-- **Build command:** `npm run build --prefix next-client`
+- **Build command:** `npm install --prefix next-client && npm run build --prefix next-client`
 - **Publish directory:** `next-client/out`
 
 These values match the checked-in `netlify.toml`.

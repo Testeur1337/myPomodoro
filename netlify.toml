@@ -1,5 +1,5 @@
 [build]
-  command = "npm run build --prefix next-client"
+  command = "npm install --prefix next-client && npm run build --prefix next-client"
   publish = "next-client/out"
 
 [build.environment]
