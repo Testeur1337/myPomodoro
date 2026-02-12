@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addDays,
   eachDayOfInterval,
@@ -34,12 +34,12 @@ const initialTimer: TimerState = {
   phase: "focus",
   remainingSeconds: 25 * 60,
   isRunning: false,
-  startedAt: null,
-  phaseStartedAt: null,
+  phaseEndsAtMs: null,
   currentGoalId: null,
   currentProjectId: null,
   currentTopicId: null,
-  completedFocusSessions: 0
+  completedFocusSessions: 0,
+  lastCompletedPhaseKey: null
 };
 
 const phaseSeconds = (s: Settings, p: TimerPhase) =>
@@ -54,6 +54,39 @@ interface ScopeFilter {
 }
 
 const lastTimerTopicStorageKey = "mypomodoro.timer.lastTopicId";
+const timerStateStorageKey = "mypomodoro.timer.state";
+
+const computeRemainingSeconds = (phaseEndsAtMs: number, nowMs = Date.now()) => Math.max(0, Math.ceil((phaseEndsAtMs - nowMs) / 1000));
+const nextPhaseFor = (phase: TimerPhase, focusCount: number, settings: Settings): TimerPhase =>
+  phase === "focus" ? (focusCount % settings.longBreakInterval === 0 ? "longBreak" : "shortBreak") : "focus";
+const autoStartFor = (phase: TimerPhase, settings: Settings) => (phase === "focus" ? settings.autoStartFocus : settings.autoStartBreaks);
+const phaseCompletionKey = (phase: TimerPhase, phaseEndsAtMs: number) => `${phase}:${phaseEndsAtMs}`;
+
+function migrateTimerState(raw: unknown, settings: Settings): TimerState | null {
+  if (!raw || typeof raw !== "object") return null;
+  const data = raw as Partial<TimerState> & { startedAt?: string | null; phaseStartedAt?: string | null };
+  const phase = data.phase === "focus" || data.phase === "shortBreak" || data.phase === "longBreak" ? data.phase : "focus";
+  const baseRemaining = typeof data.remainingSeconds === "number" && Number.isFinite(data.remainingSeconds)
+    ? Math.max(0, Math.round(data.remainingSeconds))
+    : phaseSeconds(settings, phase);
+
+  let phaseEndsAtMs = typeof data.phaseEndsAtMs === "number" && Number.isFinite(data.phaseEndsAtMs) ? data.phaseEndsAtMs : null;
+  if (!phaseEndsAtMs && data.isRunning && baseRemaining > 0) {
+    phaseEndsAtMs = Date.now() + baseRemaining * 1000;
+  }
+
+  return {
+    phase,
+    isRunning: Boolean(data.isRunning),
+    remainingSeconds: phaseEndsAtMs ? computeRemainingSeconds(phaseEndsAtMs) : baseRemaining,
+    phaseEndsAtMs,
+    currentGoalId: data.currentGoalId ?? null,
+    currentProjectId: data.currentProjectId ?? null,
+    currentTopicId: data.currentTopicId ?? null,
+    completedFocusSessions: typeof data.completedFocusSessions === "number" ? Math.max(0, Math.floor(data.completedFocusSessions)) : 0,
+    lastCompletedPhaseKey: typeof data.lastCompletedPhaseKey === "string" ? data.lastCompletedPhaseKey : null
+  };
+}
 
 export default function App() {
   const [client, setClient] = useState<DataClient | null>(null);
@@ -112,6 +145,24 @@ export default function App() {
     [scope, sessions]
   );
 
+  const timerRef = useRef(timer);
+  const settingsRef = useRef(settings);
+  const clientRef = useRef<DataClient | null>(client);
+  const processingRef = useRef(false);
+  const pendingResyncRef = useRef(false);
+
+  useEffect(() => {
+    timerRef.current = timer;
+  }, [timer]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    clientRef.current = client;
+  }, [client]);
+
   const loadAll = async (dc: DataClient) => {
     const [loadedSettings, loadedGoals, loadedProjects, loadedTopics, loadedSessions] = await Promise.all([
       dc.getSettings(),
@@ -125,21 +176,112 @@ export default function App() {
     setProjects(loadedProjects);
     setTopics(loadedTopics);
     setSessions(loadedSessions);
-    setTimer((prev) => ({ ...prev, remainingSeconds: phaseSeconds(loadedSettings, prev.phase) }));
   };
 
-  useEffect(() => {
-    createDataClient(false).then((dc) => {
-      setClient(dc);
-      loadAll(dc);
-    });
+  const resyncTimer = useCallback(async () => {
+    const dc = clientRef.current;
+    if (!dc || processingRef.current) {
+      pendingResyncRef.current = true;
+      return;
+    }
+
+    processingRef.current = true;
+    pendingResyncRef.current = false;
+
+    try {
+      let working = timerRef.current;
+      let nowMs = Date.now();
+      let safety = 0;
+
+      while (working.isRunning && working.phaseEndsAtMs && working.phaseEndsAtMs <= nowMs && safety < 20) {
+        safety += 1;
+
+        const completionKey = phaseCompletionKey(working.phase, working.phaseEndsAtMs);
+        if (working.lastCompletedPhaseKey !== completionKey) {
+          const phaseDurationSeconds = phaseSeconds(settingsRef.current, working.phase);
+          const endedAtMs = working.phaseEndsAtMs;
+          const isFocus = working.phase === "focus";
+          const created = await dc.createSession({
+            type: isFocus ? "focus" : "break",
+            topicId: isFocus ? working.currentTopicId : null,
+            note: null,
+            rating: null,
+            startTime: new Date(endedAtMs - phaseDurationSeconds * 1000).toISOString(),
+            endTime: new Date(endedAtMs).toISOString(),
+            durationSeconds: phaseDurationSeconds
+          });
+
+          setSessions((prev) => [...prev, created]);
+          if (created.type === "focus") {
+            setRatingTarget(created);
+            setDraftNote(created.note ?? "");
+          }
+        }
+
+        const nextFocusCount = working.phase === "focus" ? working.completedFocusSessions + 1 : working.completedFocusSessions;
+        const nextPhase = nextPhaseFor(working.phase, nextFocusCount, settingsRef.current);
+        const nextDuration = phaseSeconds(settingsRef.current, nextPhase);
+        const shouldAutoStart = autoStartFor(nextPhase, settingsRef.current);
+
+        working = {
+          ...working,
+          phase: nextPhase,
+          completedFocusSessions: nextFocusCount,
+          remainingSeconds: nextDuration,
+          isRunning: shouldAutoStart,
+          phaseEndsAtMs: shouldAutoStart ? working.phaseEndsAtMs + nextDuration * 1000 : null,
+          lastCompletedPhaseKey: completionKey
+        };
+
+        nowMs = Date.now();
+      }
+
+      if (working.isRunning && working.phaseEndsAtMs) {
+        working = {
+          ...working,
+          remainingSeconds: computeRemainingSeconds(working.phaseEndsAtMs)
+        };
+      }
+
+      timerRef.current = working;
+      setTimer(working);
+    } finally {
+      processingRef.current = false;
+      if (pendingResyncRef.current) {
+        pendingResyncRef.current = false;
+        void resyncTimer();
+      }
+    }
   }, []);
 
   useEffect(() => {
-    const storedTopicId = localStorage.getItem(lastTimerTopicStorageKey);
-    if (!storedTopicId) return;
-    setTimer((prev) => ({ ...prev, currentTopicId: storedTopicId }));
-  }, []);
+    createDataClient(false).then(async (dc) => {
+      setClient(dc);
+      clientRef.current = dc;
+      const storedTopicId = localStorage.getItem(lastTimerTopicStorageKey);
+      const storedTimer = localStorage.getItem(timerStateStorageKey);
+      if (storedTimer) {
+        try {
+          const migrated = migrateTimerState(JSON.parse(storedTimer), settingsRef.current);
+          if (migrated) {
+            setTimer((prev) => ({
+              ...migrated,
+              currentGoalId: migrated.currentGoalId ?? prev.currentGoalId,
+              currentProjectId: migrated.currentProjectId ?? prev.currentProjectId,
+              currentTopicId: migrated.currentTopicId ?? (storedTopicId ?? prev.currentTopicId)
+            }));
+          }
+        } catch {
+          // ignore invalid timer cache
+        }
+      } else if (storedTopicId) {
+        setTimer((prev) => ({ ...prev, currentTopicId: storedTopicId }));
+      }
+
+      await loadAll(dc);
+      await resyncTimer();
+    });
+  }, [resyncTimer]);
 
   useEffect(() => {
     if (!timer.currentTopicId) return;
@@ -147,53 +289,38 @@ export default function App() {
   }, [timer.currentTopicId]);
 
   useEffect(() => {
-    if (!timer.isRunning) {
+    localStorage.setItem(timerStateStorageKey, JSON.stringify(timer));
+  }, [timer]);
+
+  useEffect(() => {
+    if (!timer.isRunning || !timer.phaseEndsAtMs) {
       return;
     }
     const id = window.setInterval(() => {
-      setTimer((prev) => {
-        if (prev.remainingSeconds > 1) {
-          return { ...prev, remainingSeconds: prev.remainingSeconds - 1 };
-        }
-        void completePhase(prev);
-        return prev;
-      });
-    }, 1000);
+      void resyncTimer();
+    }, 500);
     return () => window.clearInterval(id);
-  }, [timer.isRunning, settings, activeTopics]);
+  }, [resyncTimer, timer.isRunning, timer.phaseEndsAtMs]);
 
-  const completePhase = async (state: TimerState) => {
-    if (!client) {
-      return;
-    }
-    const now = new Date();
-    const isFocus = state.phase === "focus";
-    const created = await client.createSession({
-      type: isFocus ? "focus" : "break",
-      topicId: isFocus ? state.currentTopicId : null,
-      note: null,
-      rating: null,
-      startTime: new Date(now.getTime() - phaseSeconds(settings, state.phase) * 1000).toISOString(),
-      endTime: now.toISOString(),
-      durationSeconds: phaseSeconds(settings, state.phase)
-    });
-    setSessions((prev) => [...prev, created]);
-    if (created.type === "focus") {
-      setRatingTarget(created);
-      setDraftNote(created.note ?? "");
-    }
+  useEffect(() => {
+    const handleResync = () => {
+      void resyncTimer();
+    };
+    document.addEventListener("visibilitychange", handleResync);
+    window.addEventListener("focus", handleResync);
+    return () => {
+      document.removeEventListener("visibilitychange", handleResync);
+      window.removeEventListener("focus", handleResync);
+    };
+  }, [resyncTimer]);
 
-    const focusCount = state.phase === "focus" ? state.completedFocusSessions + 1 : state.completedFocusSessions;
-    const nextPhase: TimerPhase =
-      state.phase === "focus" ? (focusCount % settings.longBreakInterval === 0 ? "longBreak" : "shortBreak") : "focus";
-    setTimer((prev) => ({
-      ...prev,
-      phase: nextPhase,
-      remainingSeconds: phaseSeconds(settings, nextPhase),
-      isRunning: nextPhase === "focus" ? settings.autoStartFocus : settings.autoStartBreaks,
-      completedFocusSessions: focusCount
-    }));
-  };
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      console.assert(computeRemainingSeconds(Date.now() + 10_000, Date.now() + 15_000) === 0, "Timer resync should clamp to zero");
+      const migrated = migrateTimerState({ phase: "focus", isRunning: true, remainingSeconds: 5 }, settings);
+      console.assert(Boolean(migrated?.phaseEndsAtMs), "Timer migration should infer phaseEndsAtMs");
+    }
+  }, [settings]);
 
   const focusSessions = useMemo(() => filteredSessions.filter((s) => s.type === "focus"), [filteredSessions]);
 
@@ -420,7 +547,17 @@ export default function App() {
               <div>Phase: {timer.phase}</div>
               <button
                 className="mr-2 rounded bg-emerald-500 px-4 py-2 text-black"
-                onClick={() => setTimer((prev) => ({ ...prev, isRunning: !prev.isRunning }))}
+                onClick={() =>
+                  setTimer((prev) => {
+                    if (prev.isRunning) {
+                      const remaining = prev.phaseEndsAtMs ? computeRemainingSeconds(prev.phaseEndsAtMs) : prev.remainingSeconds;
+                      return { ...prev, isRunning: false, phaseEndsAtMs: null, remainingSeconds: remaining };
+                    }
+
+                    const remaining = Math.max(1, prev.remainingSeconds || phaseSeconds(settings, prev.phase));
+                    return { ...prev, isRunning: true, remainingSeconds: remaining, phaseEndsAtMs: Date.now() + remaining * 1000 };
+                  })
+                }
               >
                 {timer.isRunning ? "Pause" : "Start"}
               </button>
@@ -430,7 +567,8 @@ export default function App() {
                   setTimer((prev) => ({
                     ...prev,
                     remainingSeconds: phaseSeconds(settings, prev.phase),
-                    isRunning: false
+                    isRunning: false,
+                    phaseEndsAtMs: null
                   }))
                 }
               >
