@@ -55,10 +55,66 @@ export interface SessionRecord {
   createdAt: string;
 }
 
+export type PlannerPriority = "low" | "med" | "high";
+
+export interface PlannerTask {
+  id: string;
+  title: string;
+  priority: PlannerPriority;
+  note: string | null;
+  completed: boolean;
+  startMin: number | null;
+  endMin: number | null;
+  sourceRecurringId?: string;
+  deleted?: boolean;
+}
+
+export interface PlannerDay {
+  tasks: PlannerTask[];
+  generatedFromRecurring: boolean;
+}
+
+export interface RecurrenceRule {
+  type: "daily" | "weekly";
+  interval: number;
+  weekdays?: number[];
+}
+
+export interface RecurringTask {
+  id: string;
+  title: string;
+  priority: PlannerPriority;
+  note: string | null;
+  recurrence: RecurrenceRule;
+  defaultSchedule: {
+    startMin: number;
+    endMin: number;
+  } | null;
+  createdAt: string;
+  archived: boolean;
+}
+
+export interface TimeBlockingTemplateBlock {
+  title: string;
+  startMin: number;
+  endMin: number;
+  priority: PlannerPriority;
+}
+
+export interface TimeBlockingTemplate {
+  id: string;
+  name: string;
+  blocks: TimeBlockingTemplateBlock[];
+  createdAt: string;
+}
+
 export interface ExportPayload {
   settings: Settings;
   goals: Goal[];
   projects: Project[];
   topics: Topic[];
   sessions: SessionRecord[];
+  planner?: Record<string, PlannerDay>;
+  recurring?: RecurringTask[];
+  templates?: TimeBlockingTemplate[];
 }
