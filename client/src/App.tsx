@@ -12,6 +12,7 @@ import {
 } from "date-fns";
 import { Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import SettingsPanel from "./components/SettingsPanel";
+import PlannerPanel from "./components/planner/PlannerPanel";
 import { DataClient, createDataClient } from "./utils/dataClient";
 import { Goal, Project, SessionRecord, Settings, TimerPhase, TimerState, Topic } from "./types";
 import { formatDuration } from "./utils/time";
@@ -558,60 +559,63 @@ export default function App() {
         )}
 
         {tab === "planning" && (
-          <section className="grid gap-4 md:grid-cols-3">
-            <EntityCard
-              title="Goals"
-              items={activeGoals}
-              onAdd={async (name) => {
-                if (!client) return false;
-                const created = await client.createGoal({ name, description: "" });
-                setGoals((prev) => [...prev, created]);
-                return true;
-              }}
-              onArchive={async (id) => {
-                if (!client) return;
-                await client.deleteGoal(id);
-                setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, archived: true } : g)));
-              }}
-            />
-            <EntityCard
-              title="Projects"
-              items={activeProjects}
-              onAdd={async (name) => {
-                if (!client) return false;
-                const goalId = timer.currentGoalId ?? activeGoals[0]?.id;
-                if (!goalId) return false;
-                const created = await client.createProject({
-                  goalId,
-                  name,
-                  description: "",
-                  color: "#38bdf8"
-                });
-                setProjects((prev) => [...prev, created]);
-                return true;
-              }}
-              onArchive={async (id) => {
-                if (!client) return;
-                await client.deleteProject(id);
-                setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, archived: true } : p)));
-              }}
-            />
-            <EntityCard
-              title="Topics"
-              items={activeTopics}
-              onAdd={async (name) => {
-                if (!client || !timer.currentProjectId) return false;
-                const created = await client.createTopic({ name, color: "#22c55e", projectId: timer.currentProjectId });
-                setTopics((prev) => [...prev, created]);
-                return true;
-              }}
-              onArchive={async (id) => {
-                if (!client) return;
-                await client.deleteTopic(id);
-                setTopics((prev) => prev.map((t) => (t.id === id ? { ...t, archived: true } : t)));
-              }}
-            />
-          </section>
+          <div className="space-y-4">
+            <section className="grid gap-4 md:grid-cols-3">
+              <EntityCard
+                title="Goals"
+                items={activeGoals}
+                onAdd={async (name) => {
+                  if (!client) return false;
+                  const created = await client.createGoal({ name, description: "" });
+                  setGoals((prev) => [...prev, created]);
+                  return true;
+                }}
+                onArchive={async (id) => {
+                  if (!client) return;
+                  await client.deleteGoal(id);
+                  setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, archived: true } : g)));
+                }}
+              />
+              <EntityCard
+                title="Projects"
+                items={activeProjects}
+                onAdd={async (name) => {
+                  if (!client) return false;
+                  const goalId = timer.currentGoalId ?? activeGoals[0]?.id;
+                  if (!goalId) return false;
+                  const created = await client.createProject({
+                    goalId,
+                    name,
+                    description: "",
+                    color: "#38bdf8"
+                  });
+                  setProjects((prev) => [...prev, created]);
+                  return true;
+                }}
+                onArchive={async (id) => {
+                  if (!client) return;
+                  await client.deleteProject(id);
+                  setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, archived: true } : p)));
+                }}
+              />
+              <EntityCard
+                title="Topics"
+                items={activeTopics}
+                onAdd={async (name) => {
+                  if (!client || !timer.currentProjectId) return false;
+                  const created = await client.createTopic({ name, color: "#22c55e", projectId: timer.currentProjectId });
+                  setTopics((prev) => [...prev, created]);
+                  return true;
+                }}
+                onArchive={async (id) => {
+                  if (!client) return;
+                  await client.deleteTopic(id);
+                  setTopics((prev) => prev.map((t) => (t.id === id ? { ...t, archived: true } : t)));
+                }}
+              />
+            </section>
+            <PlannerPanel client={client} />
+          </div>
         )}
 
         {tab === "analytics" && (

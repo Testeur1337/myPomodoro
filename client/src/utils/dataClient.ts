@@ -1,10 +1,13 @@
-import { ExportPayload, Goal, Project, SessionRecord, Settings, Topic } from "../types";
+import { ExportPayload, Goal, PlannerDay, Project, RecurringTask, SessionRecord, Settings, TimeBlockingTemplate, Topic } from "../types";
 
 const settingsKey = "mypomodoro.settings";
 const goalsKey = "mypomodoro.goals";
 const projectsKey = "mypomodoro.projects";
 const topicsKey = "mypomodoro.topics";
 const sessionsKey = "mypomodoro.sessions";
+const plannerKey = "mypomodoro.planner";
+const recurringKey = "mypomodoro.recurring";
+const templatesKey = "mypomodoro.templates";
 
 const defaultSettings: Settings = {
   focusMinutes: 25,
@@ -55,6 +58,12 @@ export interface DataClient {
   createSession: (session: Pick<SessionRecord, "type" | "topicId" | "note" | "rating" | "startTime" | "endTime" | "durationSeconds">) => Promise<SessionRecord>;
   updateSession: (id: string, patch: Partial<SessionRecord>) => Promise<SessionRecord>;
   deleteSession: (id: string) => Promise<void>;
+  getPlannerDay: (date: string) => Promise<PlannerDay>;
+  savePlannerDay: (date: string, day: PlannerDay) => Promise<PlannerDay>;
+  getRecurring: () => Promise<RecurringTask[]>;
+  saveRecurring: (items: RecurringTask[]) => Promise<RecurringTask[]>;
+  getTemplates: () => Promise<TimeBlockingTemplate[]>;
+  saveTemplates: (items: TimeBlockingTemplate[]) => Promise<TimeBlockingTemplate[]>;
   exportAll: () => Promise<ExportPayload>;
   importAll: (payload: ExportPayload) => Promise<ExportPayload>;
 }
@@ -88,6 +97,12 @@ async function buildServerClient(): Promise<DataClient> {
     createSession: (session) => safeFetch("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(session) }),
     updateSession: (id, patch) => safeFetch(`/api/sessions/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }),
     deleteSession: async (id) => { await safeFetch(`/api/sessions/${id}`, { method: "DELETE" }); },
+    getPlannerDay: (date) => safeFetch(`/api/planner${queryString({ date })}`),
+    savePlannerDay: (date, day) => safeFetch(`/api/planner${queryString({ date })}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(day) }),
+    getRecurring: () => safeFetch("/api/recurring"),
+    saveRecurring: (items) => safeFetch("/api/recurring", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(items) }),
+    getTemplates: () => safeFetch("/api/templates"),
+    saveTemplates: (items) => safeFetch("/api/templates", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(items) }),
     exportAll: () => safeFetch("/api/export"),
     importAll: (payload) => safeFetch("/api/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
   };
@@ -125,8 +140,22 @@ function buildLocalClient(): DataClient {
     createSession: async (session) => { const all = loadLocal(sessionsKey, [] as SessionRecord[]); if (session.type === "focus" && !session.topicId) throw new Error("Focus sessions require topicId"); const entry: SessionRecord = { ...session, goalId: null, projectId: null, topicName: null, id: `s_${crypto.randomUUID()}`, createdAt: new Date().toISOString() }; saveLocal(sessionsKey, [...all, entry]); return entry; },
     updateSession: async (id, patch) => { const all = loadLocal(sessionsKey, [] as SessionRecord[]); const next = all.map((s) => (s.id === id ? { ...s, ...patch } : s)); saveLocal(sessionsKey, next); return next.find((s) => s.id === id)!; },
     deleteSession: async (id) => saveLocal(sessionsKey, loadLocal(sessionsKey, [] as SessionRecord[]).filter((s) => s.id !== id)),
-    exportAll: async () => ({ settings: loadLocal(settingsKey, defaultSettings), goals: await getGoals(), projects: await getProjects(), topics: await getTopics(), sessions: loadLocal(sessionsKey, [] as SessionRecord[]) }),
-    importAll: async (payload) => { saveLocal(settingsKey, payload.settings); saveLocal(goalsKey, payload.goals ?? []); saveLocal(projectsKey, payload.projects ?? []); saveLocal(topicsKey, payload.topics); saveLocal(sessionsKey, payload.sessions); return payload; }
+    getPlannerDay: async (date) => {
+      const planner = loadLocal(plannerKey, {} as Record<string, PlannerDay>);
+      return planner[date] ?? { tasks: [], generatedFromRecurring: false };
+    },
+    savePlannerDay: async (date, day) => {
+      const planner = loadLocal(plannerKey, {} as Record<string, PlannerDay>);
+      planner[date] = day;
+      saveLocal(plannerKey, planner);
+      return day;
+    },
+    getRecurring: async () => loadLocal(recurringKey, [] as RecurringTask[]),
+    saveRecurring: async (items) => (saveLocal(recurringKey, items), items),
+    getTemplates: async () => loadLocal(templatesKey, [] as TimeBlockingTemplate[]),
+    saveTemplates: async (items) => (saveLocal(templatesKey, items), items),
+    exportAll: async () => ({ settings: loadLocal(settingsKey, defaultSettings), goals: await getGoals(), projects: await getProjects(), topics: await getTopics(), sessions: loadLocal(sessionsKey, [] as SessionRecord[]), planner: loadLocal(plannerKey, {} as Record<string, PlannerDay>), recurring: loadLocal(recurringKey, [] as RecurringTask[]), templates: loadLocal(templatesKey, [] as TimeBlockingTemplate[]) }),
+    importAll: async (payload) => { saveLocal(settingsKey, payload.settings); saveLocal(goalsKey, payload.goals ?? []); saveLocal(projectsKey, payload.projects ?? []); saveLocal(topicsKey, payload.topics); saveLocal(sessionsKey, payload.sessions); saveLocal(plannerKey, payload.planner ?? {}); saveLocal(recurringKey, payload.recurring ?? []); saveLocal(templatesKey, payload.templates ?? []); return payload; }
   };
 }
 

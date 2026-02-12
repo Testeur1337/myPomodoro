@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { z } from "zod";
-import { ExportPayload, Goal, Project, SessionRecord, Settings, Topic } from "./types";
+import { ExportPayload, Goal, PlannerDay, PlannerTask, Project, RecurringTask, SessionRecord, Settings, TimeBlockingTemplate, Topic } from "./types";
 
 const dataDir = path.resolve(__dirname, "../data");
 const settingsPath = path.join(dataDir, "settings.json");
@@ -9,6 +9,9 @@ const goalsPath = path.join(dataDir, "goals.json");
 const projectsPath = path.join(dataDir, "projects.json");
 const topicsPath = path.join(dataDir, "topics.json");
 const sessionsPath = path.join(dataDir, "sessions.json");
+const plannerPath = path.join(dataDir, "planner.json");
+const recurringPath = path.join(dataDir, "recurring.json");
+const templatesPath = path.join(dataDir, "templates.json");
 
 const UNASSIGNED_GOAL_ID = "g-unassigned";
 const UNASSIGNED_PROJECT_ID = "p-unassigned";
@@ -69,12 +72,81 @@ export const sessionSchema = z.object({
   createdAt: z.string()
 });
 
+
+
+const prioritySchema = z.union([z.literal("low"), z.literal("med"), z.literal("high")]);
+
+const plannerTaskSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1),
+  priority: prioritySchema,
+  note: z.string().nullable().optional(),
+  completed: z.boolean().default(false),
+  startMin: z.number().int().min(0).max(1439).nullable().optional(),
+  endMin: z.number().int().min(1).max(1440).nullable().optional(),
+  sourceRecurringId: z.string().optional(),
+  deleted: z.boolean().optional().default(false)
+}).transform((task) => ({ ...task, note: task.note ?? null, startMin: task.startMin ?? null, endMin: task.endMin ?? null }));
+
+const plannerDaySchema = z.object({
+  tasks: z.array(plannerTaskSchema).default([]),
+  generatedFromRecurring: z.boolean().default(false)
+});
+
+const plannerSchema = z.record(z.string(), plannerDaySchema);
+
+const recurrenceRuleSchema = z.object({
+  type: z.union([z.literal("daily"), z.literal("weekly")]),
+  interval: z.number().int().min(1).max(30),
+  weekdays: z.array(z.number().int().min(1).max(7)).optional()
+});
+
+const recurringTaskSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1),
+  priority: prioritySchema,
+  note: z.string().nullable().optional(),
+  recurrence: recurrenceRuleSchema,
+  defaultSchedule: z.object({
+    startMin: z.number().int().min(0).max(1439),
+    endMin: z.number().int().min(1).max(1440)
+  }).nullable().optional(),
+  createdAt: z.string(),
+  archived: z.boolean().default(false)
+}).superRefine((item, ctx) => {
+  if (item.defaultSchedule && item.defaultSchedule.endMin <= item.defaultSchedule.startMin) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "defaultSchedule endMin must be greater than startMin" });
+  }
+  if (item.recurrence.type === "weekly" && (!item.recurrence.weekdays || !item.recurrence.weekdays.length)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "weekly recurrence requires weekdays" });
+  }
+}).transform((item) => ({ ...item, note: item.note ?? null, defaultSchedule: item.defaultSchedule ?? null }));
+
+const templateBlockSchema = z.object({
+  title: z.string().min(1),
+  startMin: z.number().int().min(0).max(1439),
+  endMin: z.number().int().min(1).max(1440),
+  priority: prioritySchema
+}).superRefine((b, ctx) => {
+  if (b.endMin <= b.startMin) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "block endMin must be greater than startMin" });
+});
+
+const templateSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1),
+  blocks: z.array(templateBlockSchema).default([]),
+  createdAt: z.string()
+});
+
 const exportSchema = z.object({
   settings: settingsSchema,
   goals: z.array(goalSchema).optional().default([]),
   projects: z.array(projectSchema).optional().default([]),
   topics: z.array(topicSchema).optional().default([]),
-  sessions: z.array(sessionSchema).optional().default([])
+  sessions: z.array(sessionSchema).optional().default([]),
+  planner: plannerSchema.optional().default({}),
+  recurring: z.array(recurringTaskSchema).optional().default([]),
+  templates: z.array(templateSchema).optional().default([])
 });
 
 let writeQueue: Promise<void> = Promise.resolve();
@@ -234,7 +306,7 @@ export function migrateHierarchyData(input: { goals: Goal[]; projects: Project[]
   };
 }
 
-async function persistAll(settings: Settings, data: { goals: Goal[]; projects: Project[]; topics: Topic[]; sessions: SessionRecord[] }) {
+async function persistAll(settings: Settings, data: { goals: Goal[]; projects: Project[]; topics: Topic[]; sessions: SessionRecord[]; planner?: Record<string, PlannerDay>; recurring?: RecurringTask[]; templates?: TimeBlockingTemplate[] }) {
   const migrated = migrateHierarchyData(data);
   await queueWrite(async () => {
     await writeJsonAtomic(settingsPath, settingsSchema.parse(settings));
@@ -242,6 +314,9 @@ async function persistAll(settings: Settings, data: { goals: Goal[]; projects: P
     await writeJsonAtomic(projectsPath, migrated.projects);
     await writeJsonAtomic(topicsPath, migrated.topics.length ? migrated.topics : seedTopics);
     await writeJsonAtomic(sessionsPath, migrated.sessions);
+    await writeJsonAtomic(plannerPath, plannerSchema.parse(data.planner ?? {}));
+    await writeJsonAtomic(recurringPath, z.array(recurringTaskSchema).parse(data.recurring ?? []));
+    await writeJsonAtomic(templatesPath, z.array(templateSchema).parse(data.templates ?? []));
   });
   return migrated;
 }
@@ -256,12 +331,18 @@ export async function initializeData() {
   const rawProjects = await readJsonFile<any[]>(projectsPath, projectsExists ? [] : [seedProject]);
   const rawTopics = await readJsonFile<any[]>(topicsPath, seedTopics);
   const rawSessions = await readJsonFile<any[]>(sessionsPath, []);
+  const rawPlanner = await readJsonFile<Record<string, any>>(plannerPath, {});
+  const rawRecurring = await readJsonFile<any[]>(recurringPath, []);
+  const rawTemplates = await readJsonFile<any[]>(templatesPath, []);
 
   await persistAll(settings, {
     goals: normalizeGoals(rawGoals),
     projects: normalizeProjects(rawProjects),
     topics: normalizeTopics(rawTopics),
-    sessions: normalizeSessions(rawSessions)
+    sessions: normalizeSessions(rawSessions),
+    planner: plannerSchema.parse(rawPlanner),
+    recurring: z.array(recurringTaskSchema).parse(rawRecurring),
+    templates: z.array(templateSchema).parse(rawTemplates)
   });
 }
 
@@ -300,13 +381,80 @@ export const saveSessions = async (sessions: SessionRecord[]) => {
   return parsed;
 };
 
+
+export const getPlanner = async () => plannerSchema.parse(await readJsonFile(plannerPath, {} as Record<string, PlannerDay>));
+export const savePlanner = async (planner: Record<string, PlannerDay>) => {
+  const parsed = plannerSchema.parse(planner);
+  await queueWrite(() => writeJsonAtomic(plannerPath, parsed));
+  return parsed;
+};
+
+export const getRecurring = async () => z.array(recurringTaskSchema).parse(await readJsonFile(recurringPath, [] as RecurringTask[]));
+export const saveRecurring = async (items: RecurringTask[]) => {
+  const parsed = z.array(recurringTaskSchema).parse(items);
+  await queueWrite(() => writeJsonAtomic(recurringPath, parsed));
+  return parsed;
+};
+
+export const getTemplates = async () => z.array(templateSchema).parse(await readJsonFile(templatesPath, [] as TimeBlockingTemplate[]));
+export const saveTemplates = async (items: TimeBlockingTemplate[]) => {
+  const parsed = z.array(templateSchema).parse(items);
+  await queueWrite(() => writeJsonAtomic(templatesPath, parsed));
+  return parsed;
+};
+
+function recurringMatchesDate(item: RecurringTask, date: string): boolean {
+  const dayDate = new Date(`${date}T00:00:00.000Z`);
+  const created = new Date(item.createdAt);
+  if (Number.isNaN(dayDate.getTime()) || Number.isNaN(created.getTime())) return false;
+  const diffDays = Math.floor((dayDate.getTime() - created.getTime()) / 86400000);
+  if (diffDays < 0) return false;
+  if (item.recurrence.type === "daily") return diffDays % item.recurrence.interval === 0;
+  const weekday = ((dayDate.getUTCDay() + 6) % 7) + 1;
+  if (!(item.recurrence.weekdays ?? []).includes(weekday)) return false;
+  const diffWeeks = Math.floor(diffDays / 7);
+  return diffWeeks % item.recurrence.interval === 0;
+}
+
+export async function getPlannerForDate(date: string): Promise<PlannerDay> {
+  const [planner, recurring] = await Promise.all([getPlanner(), getRecurring()]);
+  const day = planner[date] ?? { tasks: [], generatedFromRecurring: false };
+  const activeRecurring = recurring.filter((item) => !item.archived && recurringMatchesDate(item, date));
+  const existingRecurringIds = new Set(day.tasks.filter((t) => t.sourceRecurringId).map((t) => t.sourceRecurringId));
+  const virtualTasks: PlannerTask[] = activeRecurring
+    .filter((item) => !existingRecurringIds.has(item.id) && !day.tasks.some((t) => t.deleted && t.sourceRecurringId === item.id))
+    .map((item) => ({
+      id: `vrt_${item.id}_${date}`,
+      title: item.title,
+      priority: item.priority,
+      note: item.note,
+      completed: false,
+      startMin: item.defaultSchedule?.startMin ?? null,
+      endMin: item.defaultSchedule?.endMin ?? null,
+      sourceRecurringId: item.id
+    }));
+
+  return { tasks: [...day.tasks.filter((t) => !t.deleted), ...virtualTasks], generatedFromRecurring: virtualTasks.length > 0 || day.generatedFromRecurring };
+}
+
+export async function savePlannerDay(date: string, day: PlannerDay): Promise<PlannerDay> {
+  const planner = await getPlanner();
+  const normalized = plannerDaySchema.parse(day);
+  planner[date] = normalized;
+  await savePlanner(planner);
+  return normalized;
+}
+
 export async function replaceAll(data: ExportPayload) {
   const parsed = exportSchema.parse(data);
   const migrated = await persistAll(parsed.settings, {
     goals: parsed.goals ?? [],
     projects: parsed.projects ?? [],
     topics: parsed.topics ?? [],
-    sessions: parsed.sessions ?? []
+    sessions: parsed.sessions ?? [],
+    planner: parsed.planner ?? {},
+    recurring: parsed.recurring ?? [],
+    templates: parsed.templates ?? []
   });
 
   return {
@@ -314,14 +462,17 @@ export async function replaceAll(data: ExportPayload) {
     goals: migrated.goals,
     projects: migrated.projects,
     topics: migrated.topics,
-    sessions: migrated.sessions
+    sessions: migrated.sessions,
+    planner: parsed.planner ?? {},
+    recurring: parsed.recurring ?? [],
+    templates: parsed.templates ?? []
   };
 }
 
 export async function exportAll(): Promise<ExportPayload> {
-  const [settings, goals, projects, topics, sessions] = await Promise.all([
-    getSettings(), getGoals(), getProjects(), getTopics(), getSessions()
+  const [settings, goals, projects, topics, sessions, planner, recurring, templates] = await Promise.all([
+    getSettings(), getGoals(), getProjects(), getTopics(), getSessions(), getPlanner(), getRecurring(), getTemplates()
   ]);
   const migrated = migrateHierarchyData({ goals, projects, topics, sessions });
-  return { settings, ...migrated };
+  return { settings, ...migrated, planner, recurring, templates };
 }

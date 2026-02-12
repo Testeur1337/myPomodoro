@@ -6,20 +6,26 @@ import { z } from "zod";
 import {
   exportAll,
   getGoals,
+  getPlannerForDate,
   getProjects,
+  getRecurring,
   getSessions,
   getSettings,
+  getTemplates,
   getTopics,
   initializeData,
   replaceAll,
   saveGoals,
+  savePlannerDay,
   saveProjects,
+  saveRecurring,
   saveSessions,
   saveSettings,
+  saveTemplates,
   saveTopics,
   settingsSchema
 } from "./dataStore";
-import { Goal, Project, SessionRecord, SessionType, Settings, Topic } from "./types";
+import { Goal, PlannerDay, PlannerTask, Project, RecurringTask, SessionRecord, SessionType, Settings, TimeBlockingTemplate, Topic } from "./types";
 import { deriveSessionHierarchy } from "./sessionHierarchy";
 
 const app = express();
@@ -49,6 +55,58 @@ const sessionPayloadSchema = z.object({
   endTime: z.string(),
   durationSeconds: z.number().min(1)
 });
+
+const plannerTaskPayloadSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1),
+  priority: z.union([z.literal("low"), z.literal("med"), z.literal("high")]),
+  note: z.string().nullable().optional(),
+  completed: z.boolean().optional(),
+  startMin: z.number().int().min(0).max(1439).nullable().optional(),
+  endMin: z.number().int().min(1).max(1440).nullable().optional(),
+  sourceRecurringId: z.string().optional(),
+  deleted: z.boolean().optional()
+}).superRefine((task, ctx) => {
+  if (task.startMin != null && task.endMin != null && task.endMin <= task.startMin) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "endMin must be greater than startMin" });
+  }
+});
+
+const plannerDayPayloadSchema = z.object({
+  tasks: z.array(plannerTaskPayloadSchema).default([]),
+  generatedFromRecurring: z.boolean().optional().default(false)
+});
+
+const recurringPayloadSchema = z.array(z.object({
+  id: z.string(),
+  title: z.string().min(1),
+  priority: z.union([z.literal("low"), z.literal("med"), z.literal("high")]),
+  note: z.string().nullable().optional(),
+  recurrence: z.object({
+    type: z.union([z.literal("daily"), z.literal("weekly")]),
+    interval: z.number().int().min(1).max(30),
+    weekdays: z.array(z.number().int().min(1).max(7)).optional()
+  }),
+  defaultSchedule: z.object({
+    startMin: z.number().int().min(0).max(1439),
+    endMin: z.number().int().min(1).max(1440)
+  }).nullable().optional(),
+  createdAt: z.string(),
+  archived: z.boolean().optional().default(false)
+}));
+
+const templatesPayloadSchema = z.array(z.object({
+  id: z.string(),
+  name: z.string().min(1),
+  blocks: z.array(z.object({
+    title: z.string().min(1),
+    startMin: z.number().int().min(0).max(1439),
+    endMin: z.number().int().min(1).max(1440),
+    priority: z.union([z.literal("low"), z.literal("med"), z.literal("high")])
+  })),
+  createdAt: z.string()
+}));
+
 const sessionUpdateSchema = z.object({
   topicId: z.string().nullable().optional(),
   topicName: z.string().nullable().optional(),
@@ -254,6 +312,49 @@ app.delete("/api/sessions/:id", async (req, res) => {
   const sessions = await getSessions();
   await saveSessions(sessions.filter((session) => session.id !== req.params.id));
   res.status(204).send();
+});
+
+
+app.get("/api/planner", async (req, res) => {
+  const date = req.query.date ? String(req.query.date) : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "date must be yyyy-mm-dd" });
+  return res.json(await getPlannerForDate(date));
+});
+
+app.put("/api/planner", async (req, res) => {
+  const date = req.query.date ? String(req.query.date) : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "date must be yyyy-mm-dd" });
+  const parsed = plannerDayPayloadSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid planner payload" });
+  const normalized: PlannerDay = {
+    tasks: parsed.data.tasks.map((task): PlannerTask => ({
+      id: task.id,
+      title: task.title,
+      priority: task.priority,
+      note: task.note ?? null,
+      completed: task.completed ?? false,
+      startMin: task.startMin ?? null,
+      endMin: task.endMin ?? null,
+      sourceRecurringId: task.sourceRecurringId,
+      deleted: task.deleted
+    })),
+    generatedFromRecurring: parsed.data.generatedFromRecurring
+  };
+  return res.json(await savePlannerDay(date, normalized));
+});
+
+app.get("/api/recurring", async (_req, res) => res.json(await getRecurring()));
+app.put("/api/recurring", async (req, res) => {
+  const parsed = recurringPayloadSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid recurring payload" });
+  return res.json(await saveRecurring(parsed.data as RecurringTask[]));
+});
+
+app.get("/api/templates", async (_req, res) => res.json(await getTemplates()));
+app.put("/api/templates", async (req, res) => {
+  const parsed = templatesPayloadSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid templates payload" });
+  return res.json(await saveTemplates(parsed.data as TimeBlockingTemplate[]));
 });
 
 app.post("/api/import", async (req, res) => {
