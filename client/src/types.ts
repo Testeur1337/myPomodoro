@@ -69,10 +69,10 @@ export interface TimerState {
   phase: TimerPhase;
   remainingSeconds: number;
   isRunning: boolean;
-  startedAt: string | null;
-  phaseStartedAt: string | null;
+  phaseEndsAtMs: number | null;
   currentGoalId: string | null;
   currentProjectId: string | null;
   currentTopicId: string | null;
   completedFocusSessions: number;
+  lastCompletedPhaseKey: string | null;
 }
